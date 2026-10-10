@@ -745,6 +745,15 @@ public class SettingsView : BaseView
 
                 break;
             case "DownloadDirectory":
+                // Open a TUI folder browser; keep the existing manual path entry as fallback.
+                var secilenDizin = FolderPicker.Select(config.DownloadDirectory, "İndirme dizini seç");
+
+                if (!string.IsNullOrWhiteSpace(secilenDizin))
+                {
+                    config.DownloadDirectory = secilenDizin;
+                    break;
+                }
+
                 var downloadDir = (Theme.Ask("İndirme dizini:", config.DownloadDirectory) ?? string.Empty).Trim();
                 if (string.IsNullOrEmpty(downloadDir))
                 {
