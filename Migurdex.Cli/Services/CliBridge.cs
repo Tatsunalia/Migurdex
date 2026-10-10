@@ -7,8 +7,28 @@ namespace Migurdex.Cli.Services;
 
 public sealed class CliBridge : ISharedBridge
 {
+    private readonly ILoggerFactory _loggerFactory;
+
+    /// <param name="loggerFactory">
+    ///     Core'daki <c>ILogger</c> kullanan her sınıf bu köprüden logger alır
+    ///     (50+ dosya: extractor'lar, plugin yükleyici, izleme servisleri).
+    ///     <c>null</c> verilirse önceki davranış korunur: log yok.
+    /// </param>
+    /// <remarks>
+    /// ⭐ Önceden burası <see cref="NullLoggerFactory.Instance"/> döndürüyordu,
+    ///     yani CLI'daki tüm log mesajları **tamamen çöpe atılıyordu**.
+    ///     Program.cs artık Serilog'u buraya veriyor; böylece bir indirme
+    ///     hatası ekranda kaybolmak yerine <c>logs/</c> klasörüne yazılıyor.
+    /// </remarks>
+    public CliBridge(ILoggerFactory? loggerFactory = null)
+    {
+        _loggerFactory = loggerFactory ?? NullLoggerFactory.Instance;
+    }
+
     public IMp4MetadataReader MetadataReader => throw new NotSupportedException();
-    public ILoggerFactory     LoggerFactory  => NullLoggerFactory.Instance;
+
+    /// <inheritdoc />
+    public ILoggerFactory LoggerFactory => _loggerFactory;
 
     public HttpClient CreateHttpClient(HttpClientOptions? options = null)
     {
@@ -22,6 +42,6 @@ public sealed class CliBridge : ISharedBridge
 
     public ILogger<T> CreateLogger<T>()
     {
-        return NullLogger<T>.Instance;
+        return _loggerFactory.CreateLogger<T>();
     }
 }
