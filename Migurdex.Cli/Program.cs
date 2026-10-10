@@ -1,6 +1,7 @@
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Migurdex.Cli.Services;
+using Serilog;
 using Migurdex.Cli.Services.Downloads;
 using Migurdex.Cli.Tui;
 using Migurdex.Cli.Tui.Views;
@@ -8,6 +9,7 @@ using Migurdex.Core.Database;
 using Migurdex.Core.Extensions;
 using Migurdex.Core.Services;
 using Migurdex.Core.Services.Turnstile;
+using Migurdex.Core.Utils;
 using Migurdex.Shared.Models;
 using Migurdex.Shared.Update;
 using Spectre.Console;
@@ -119,6 +121,14 @@ public static class Program
 
             using var serviceProvider = services.BuildServiceProvider();
 
+            // ⭐ Başlangıç kaydı: log sisteminin gerçekten çalıştığının
+            //   kanıtıdır. Serilog dosyayı ilk Log çağrısında açar; bu satır
+            //   olmadan `logs/` klasörü boş kalır ve kullanıcı "log yok"
+            //   diye düşünür.
+            serviceProvider.GetService<ILoggerFactory>()
+                           ?.CreateLogger("Migurdex")
+                           .LogInformation("Migurdex baslatildi (surum {Surum})", AppInfo.GetVersion());
+
             AnsiConsole.Clear();
             AnsiConsole.MarkupLine("[bold cyan]Migurdex[/] [grey]başlatılıyor...[/]");
             AnsiConsole.WriteLine();
@@ -180,12 +190,58 @@ public static class Program
         {
             return 0;
         }
+        catch (Exception ex)
+        {
+            // ⭐ Yakalanmamış istisna ÖNCEDE ekrana düşüyor ve uygulamayı
+            //   öldürüyordu; log dosyasına hiçbir şey yazılmıyordu. Bu
+            //   katman olmadan "çöktü" dediğinde sebebi öğrenmek imkânsızdı.
+            //   Kullanıcı log dosyasını paylaşarak hatayı bildirebilsin.
+            Log.Fatal(ex, "Migurdex beklenmeyen bir hatayla durdu");
+
+            AnsiConsole.Clear();
+            AnsiConsole.MarkupLine("[red]Beklenmeyen bir hata oluştu.[/]");
+            AnsiConsole.MarkupLine("[grey]Ayrıntılar log dosyasına yazıldı:[/] " + LogFileLocation());
+            AnsiConsole.WriteLine();
+
+            if (!Console.IsInputRedirected)
+            {
+                try { Console.ReadKey(true); }
+                catch
+                {
+                    // ignored
+                }
+            }
+
+            return 1;
+        }
         finally
         {
             Console.CancelKeyPress -= tuiCancelHandler;
             RestoreCursor();
             TuiApplicationCancellation.Reset();
         }
+    }
+
+    /// <summary>Log dosyasının yolunu kullanıcıya gösterir.</summary>
+    /// <remarks>
+    /// ⭐ Serilog dosyayı <c>logs/Migurdex-&lt;tarih&gt;.log</c> adıyla
+    ///     açar. Kullanıcı hatayı bildirmek istediğinde bu dosyanın
+    ///     yerini bilmesi gerekir; yoksa log sistemi işe yaramaz.
+    /// </remarks>
+    private static string LogFileLocation()
+    {
+        var kok = AppContext.BaseDirectory;
+        if (string.IsNullOrEmpty(kok) || !Directory.Exists(kok))
+        {
+            var exeDizin = Environment.ProcessPath is { Length: > 0 } yol
+                               ? Path.GetDirectoryName(yol)
+                               : null;
+            kok = !string.IsNullOrEmpty(exeDizin) && Directory.Exists(exeDizin)
+                      ? exeDizin!
+                      : Directory.GetCurrentDirectory();
+        }
+
+        return Path.Combine(kok, "logs");
     }
 
     private static async Task MaybePromptForUpdateAsync(IServiceProvider services, bool noUpdateCheck)
@@ -279,9 +335,17 @@ public static class Program
 
     private static void ConfigureServices(IServiceCollection services)
     {
+        // Keep Turnstile warnings visible on stderr while Serilog writes the
+        // normal CLI diagnostics to rolling files only.
         var stderrProvider = new StderrLoggerProvider();
-        services.AddLogging(builder => builder.AddProvider(stderrProvider));
         services.AddSingleton(stderrProvider);
+        // ⭐ CLI loglama: Serilog yalnız DOSYAYA yazar, konsola değil.
+        //   TUI ekranı kullanıyor; konsola yazılan her satır indirme
+        //   çubuğunun üstüne biner. API tarafı LoggerBuilder.ConfigureLogging
+        //   ile konsol+a dosya kullanıyor, CLI ise aynı kurulumun dosya-yalnız
+        //   hâlidir (LoggerBuilder.Configure).
+        LoggerBuilder.Configure(services, writeToConsole: false);
+        services.AddLogging(builder => builder.AddProvider(stderrProvider));
         services.AddSingleton<IConfigurationService, ConfigurationService>();
         services.AddSingleton<MigurdexDatabase>(sp =>
                                                     new MigurdexDatabase(
@@ -314,12 +378,20 @@ public static class Program
 
         services.AddSingleton<OAuthTokenStore>(sp =>
                                                    new OAuthTokenStore(sp.GetRequiredService<MigurdexDatabase>()));
-        services.AddSingleton<AniListOAuthClient>(_ => new AniListOAuthClient(new CliBridge(),
+
+        // ⭐ Tek bir CliBridge kaydı: logger fabrikasını DI'den alır. Önceden
+        //   her yerde `new CliBridge()` deniyordu ve logger NullLoggerFactory
+        //   idi, yani CLI'daki tüm log mesajları çöpe gidiyordu.
+        services.AddSingleton<CliBridge>(sp => new CliBridge(sp.GetService<ILoggerFactory>()));
+
+        services.AddSingleton<AniListOAuthClient>(sp => new AniListOAuthClient(
+                                                                              sp.GetRequiredService<CliBridge>(),
                                                                               AniListAppCredentials.ClientId,
                                                                               AniListAppCredentials
                                                                                   .ClientSecret));
-        services.AddSingleton<MalOAuthClient>(_ => new MalOAuthClient(new CliBridge(),
-                                                                      MalAppCredentials.ClientId));
+        services.AddSingleton<MalOAuthClient>(sp => new MalOAuthClient(
+                                                                    sp.GetRequiredService<CliBridge>(),
+                                                                    MalAppCredentials.ClientId));
         services.AddSingleton<WatchSyncService>(sp =>
         {
             var api      = sp.GetRequiredService<IApiClientService>();
@@ -327,8 +399,9 @@ public static class Program
             var db       = sp.GetRequiredService<MigurdexDatabase>();
             var aniOauth = sp.GetRequiredService<AniListOAuthClient>();
             var malOauth = sp.GetRequiredService<MalOAuthClient>();
-            var aniList  = new AniListListClient(new CliBridge(), aniOauth, store);
-            var mal      = new MalListClient(new CliBridge(), malOauth, store);
+            var bridge   = sp.GetRequiredService<CliBridge>();
+            var aniList  = new AniListListClient(bridge, aniOauth, store);
+            var mal      = new MalListClient(bridge, malOauth, store);
             return new WatchSyncService(aniList,
                                         store,
                                         (provider, animeId, season, episode, title, ct) =>
