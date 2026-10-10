@@ -519,7 +519,13 @@ public class EpisodeSourcesView : BaseView
                                  new SpinnerColumn())
                              .StartAsync(async progressContext =>
                              {
-                                 var task = progressContext.AddTask("Hazırlanıyor", maxValue: 100);
+                                 // ⭐ Ne indirildiği satırda yazıyor: hem anime hem bölüm.
+                                 //   Toplu indirme ekranı da aynı biçimi kullanıyor;
+                                 //   iki ekranın gösterisi ayrışmaz.
+                                 var hedefEtiketi = TuiHelpers.FormatHedefEtiketi(_animeTitle, episode);
+
+                                 var task = progressContext.AddTask($"{hedefEtiketi} • Hazırlanıyor",
+                                                                      maxValue: 100);
                                  while (!downloadTask.IsCompleted)
                                  {
                                      if (Console.KeyAvailable
@@ -530,11 +536,11 @@ public class EpisodeSourcesView : BaseView
                                          break;
                                      }
 
-                                     UpdateDownloadTask(task, progressTracker);
+                                     UpdateDownloadTask(task, progressTracker, hedefEtiketi);
                                      await Task.Delay(100);
                                  }
 
-                                 UpdateDownloadTask(task, progressTracker);
+                                 UpdateDownloadTask(task, progressTracker, hedefEtiketi);
                              });
 
             result = await downloadTask;
@@ -636,13 +642,32 @@ public class EpisodeSourcesView : BaseView
         return Task.CompletedTask;
     }
 
-    private static void UpdateDownloadTask(ProgressTask task, DownloadProgressTracker tracker)
+    // ⭐ Erişim internal yapıldı: toplu indirme ekranı da tekli indirme ile
+    //   aynı görev satırı güncelleyicisini kullanır. Kod KOPYALANMAZ — iki
+    //   ekran aynı fonksiyonu çağırır, gösteri böylece ayrışamaz.
+    /// <param name="hedefEtiketi">
+    ///     Ne indirildiğini söyleyen ön ek. Boşsa yazılmaz.
+    /// </param>
+    /// <remarks>
+    /// ⭐ Kullanıcı "ne indiriyorum" sorusunu ekrana bakarak cevaplayamıyordu:
+    ///     satırda yalnızca bayt/hız vardı. Etiket üç çıkış yolunun
+    ///     <b>hepsine</b> eklenir — hazırlanıyor, indiriliyor, tamamlanıyor —
+    ///     çünkü <c>task.Description</c> her seferinde baştan yazılır; yalnız
+    ///     bir dalda eklemek diğerlerinde kaybolurdu.
+    /// </remarks>
+    internal static void UpdateDownloadTask(ProgressTask task,
+                                            DownloadProgressTracker tracker,
+                                            string?             hedefEtiketi = null)
     {
+        var onek = string.IsNullOrWhiteSpace(hedefEtiketi)
+                       ? string.Empty
+                       : $"{hedefEtiketi} • ";
+
         var progress = tracker.Current;
         if (progress is null)
         {
             task.IsIndeterminate = true;
-            task.Description      = "Hazırlanıyor • Esc: iptal";
+            task.Description      = $"{onek}Hazırlanıyor • Esc: iptal";
             return;
         }
 
@@ -699,12 +724,12 @@ public class EpisodeSourcesView : BaseView
                 }
             }
 
-            task.Description = detail + " • Esc: iptal";
+            task.Description = onek + detail + " • Esc: iptal";
             return;
         }
 
         task.IsIndeterminate = true;
-        task.Description      = $"{stage} • Esc: iptal";
+        task.Description      = $"{onek}{stage} • Esc: iptal";
     }
 
     private static string FormatBytes(long bytes)
@@ -723,7 +748,8 @@ public class EpisodeSourcesView : BaseView
                    : $"{value.ToString("0.##", CultureInfo.InvariantCulture)} {units[unit]}";
     }
 
-    private sealed class DownloadProgressTracker : IProgress<DownloadProgress>
+    // ⭐ Erişim internal yapıldı: toplu indirme ekranı da bu izleyiciyi kullanır.
+    internal sealed class DownloadProgressTracker : IProgress<DownloadProgress>
     {
         private readonly Lock _sync = new();
         private readonly DownloadSpeedometer _speed = new();

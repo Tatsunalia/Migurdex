@@ -80,4 +80,32 @@ public static class TuiHelpers
     {
         return Theme.Ellipsize(title.Trim(), max);
     }
+
+    /// <summary>
+    ///     İndirme satırında gösterilecek hedefi biçimlendirir.
+    /// </summary>
+    /// <remarks>
+    /// ⭐ Kullanıcı ekrana bakıp "ne indiriyorum" sorusunu cevaplayamıyordu;
+    ///     satırda yalnızca bayt ve hız vardı. Etiket <b>hem animeyi hem
+    ///     bölümü</b> içerir. Uzun anime adı kırpılır, kırpıldığı belli olsun
+    ///     diye sonuna "…" konur.
+    /// <para>
+    ///     Tekli ve toplu indirme <b>aynı</b> fonksiyonu çağırır; böylece iki
+    ///     ekranın gösterisi ayrışamaz.
+    /// </para>
+    /// </remarks>
+    public static string FormatHedefEtiketi(string? animeTitle, Episode episode)
+    {
+        var bolum = FormatEpisodeRef(episode);
+        var title = (animeTitle ?? string.Empty).Trim();
+
+        if (title.Length == 0)
+        {
+            return bolum;
+        }
+
+        var kisaltilmis = EllipsizedTitle(title, 32);
+
+        return $"{kisaltilmis} {bolum}";
+    }
 }

@@ -211,7 +211,8 @@ public static class FuzzyPrompt
         int               textCursorIndex,
         int               pageSize,
         string?           footerHelp,
-        bool              searchable)
+        bool              searchable,
+        bool              multiSelect = false)
     {
         var grid = new Grid();
         grid.AddColumn();
@@ -248,13 +249,21 @@ public static class FuzzyPrompt
         for (var i = startIdx; i < endIdx; i++)
         {
             var choice = filtered[i];
+
+            // ⭐ Kutu yalnız çoklu seçimde ve yalnız işaretlenebilir satırlarda
+            //   çizilir. Tek seçimli ekranlarda (multiSelect = false) çıktı
+            //   bu eklenmeden önceki hâliyle birebir aynıdır.
+            var checkbox = multiSelect && choice.CanBeChecked
+                               ? choice.IsChecked ? "[green]✓[/] " : "[grey]·[/] "
+                               : string.Empty;
+
             if (i == cursorIndex)
             {
-                grid.AddRow(new Markup($"[bold cyan]›[/] {SelectedRowMarkup(choice, query)}"));
+                grid.AddRow(new Markup($"[bold cyan]›[/] {checkbox}{SelectedRowMarkup(choice, query)}"));
             }
             else
             {
-                grid.AddRow(new Markup($"  {UnselectedRowMarkup(choice, query)}"));
+                grid.AddRow(new Markup($"  {checkbox}{UnselectedRowMarkup(choice, query)}"));
             }
         }
 
@@ -358,6 +367,252 @@ public static class FuzzyPrompt
 
         AnsiConsole.Clear();
         return result;
+    }
+
+    /// <summary>
+    ///     Çoklu seçim ekranı.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    ///     <c>Space</c> işaretler, <c>Ctrl+A</c> görünen tüm satırları işaretler,
+    ///     <c>Enter</c> onaylar, <c>Esc</c> iptal eder.
+    /// </para>
+    /// <para>
+    /// ⭐ <b>Neden <see cref="cancelled"/> ayrı bir bayrak?</b> <c>Enter</c> ve
+    ///     <c>Esc</c> ikisi de döngüyü durdurur; yalnız <c>Enter</c> bir satır
+    ///     seçer. "Sonuç boş" diye bakarak çıkışı <em>çıkarım</em> yapmak
+    ///     yanlıştır: işaretli satırlar varsa <c>Esc</c> de onları döndürür.
+    ///     Bu ekran o hatayı bir kez yaşadı — bölümler işaretliyken <c>Esc</c>
+    ///     basılınca indirme başlıyordu. Bu yüzden iptal burada açıkça
+    ///     işaretlenir ve işaretli satırlar <b>hiçbir koşulda</b> döndürülmez.
+    /// </para>
+    /// </remarks>
+    /// <returns>
+    ///     Onaylanan satırlar. <c>Esc</c> veya uygulama iptalinde
+    ///     <b>boş liste</b> döner; işaretli satırlar dahil edilmez.
+    /// </returns>
+    public static List<FuzzyChoice> ShowMulti(
+        string                   title,
+        IEnumerable<FuzzyChoice> choices,
+        int                      pageSize         = 15,
+        string?                  initialSelection = null,
+        IEnumerable<string>?     headerLines      = null,
+        string?                  footerHelp       = null,
+        bool                     searchable       = true)
+    {
+        var choicesList     = choices.ToList();
+        var headersList     = headerLines?.Where(h => !string.IsNullOrWhiteSpace(h)).ToList();
+        var query           = string.Empty;
+        var cursorIndex     = ResolveInitialCursor(choicesList, initialSelection);
+        var textCursorIndex = 0;
+
+        FuzzyChoice? actionChoice = null;
+        var          cancelled   = false;
+        var          isRunning   = true;
+
+        Grid BuildCurrentGrid(List<FuzzyChoice> filtered)
+            => BuildGrid(title,
+                         headersList,
+                         filtered,
+                         query,
+                         cursorIndex,
+                         textCursorIndex,
+                         pageSize,
+                         footerHelp,
+                         searchable,
+                         multiSelect: true);
+
+        AnsiConsole.Clear();
+        AnsiConsole.Live(BuildCurrentGrid(FuzzyMatcher.Rank(choicesList, query)))
+                   .Start(ctx =>
+                   {
+                       var lastQuery      = "\0";
+                       var lastCursor     = -1;
+                       var lastTextCursor = -1;
+                       var lastChecked    = -1;
+
+                       while (isRunning)
+                       {
+                           if (TuiApplicationCancellation.Token.IsCancellationRequested)
+                           {
+                               cancelled = true;
+                               isRunning = false;
+                               break;
+                           }
+
+                           var filtered = FuzzyMatcher.Rank(choicesList, query);
+                           if (cursorIndex >= filtered.Count)
+                           {
+                               cursorIndex = Math.Max(0, filtered.Count - 1);
+                           }
+
+                           // ⭐ Kutu işaretleri de değiştiğinde ekran tazelenir.
+                           var checkedCount = choicesList.Count(c => c.IsChecked);
+                           if (!query.Equals(lastQuery, StringComparison.Ordinal)
+                               || cursorIndex != lastCursor
+                               || textCursorIndex != lastTextCursor
+                               || checkedCount != lastChecked)
+                           {
+                               ctx.UpdateTarget(BuildCurrentGrid(filtered));
+                               lastQuery      = query;
+                               lastCursor     = cursorIndex;
+                               lastTextCursor = textCursorIndex;
+                               lastChecked    = checkedCount;
+                           }
+
+                           if (Console.KeyAvailable)
+                           {
+                               HandleMultiKey(Console.ReadKey(true),
+                                              filtered,
+                                              ref query,
+                                              ref cursorIndex,
+                                              ref textCursorIndex,
+                                              searchable,
+                                              ref actionChoice,
+                                              ref cancelled,
+                                              ref isRunning);
+                           }
+                           else
+                           {
+                               Thread.Sleep(15);
+                           }
+                       }
+                   });
+
+        AnsiConsole.Clear();
+
+        // ⭐ İptal: işaretli satırlar da dâhil hiçbir şey dönmez.
+        if (cancelled)
+        {
+            return [];
+        }
+
+        var selected = choicesList.Where(c => c.IsChecked).ToList();
+
+        // Hiçbiri işaretli değilse imleçteki satır seçilmiş sayılır;
+        // "Tüm bölümleri işaretle" gibi kısayollar böyle çalışır.
+        if (selected.Count == 0 && actionChoice != null && actionChoice.Searchable != "Geri")
+        {
+            selected = [actionChoice];
+        }
+
+        return selected;
+    }
+
+    /// <summary>
+    ///     Çoklu seçim ekranının tuş işleyicisi.
+    /// </summary>
+    internal static void HandleMultiKey(
+        ConsoleKeyInfo    keyInfo,
+        List<FuzzyChoice> filtered,
+        ref string        query,
+        ref int           cursorIndex,
+        ref int           textCursorIndex,
+        bool              searchable,
+        ref FuzzyChoice?  actionChoice,
+        ref bool          cancelled,
+        ref bool          isRunning)
+    {
+        if (searchable && IsWordDeleteKey(keyInfo))
+        {
+            DeleteWordBeforeCursor(ref query, ref textCursorIndex);
+            cursorIndex = 0;
+            return;
+        }
+
+        if (keyInfo.Key == ConsoleKey.Spacebar)
+        {
+            if (filtered.Count > 0)
+            {
+                var target = filtered[cursorIndex];
+                if (target.CanBeChecked)
+                {
+                    target.IsChecked = !target.IsChecked;
+                }
+            }
+
+            return;
+        }
+
+        if (keyInfo.Key == ConsoleKey.A && keyInfo.Modifiers.HasFlag(ConsoleModifiers.Control))
+        {
+            foreach (var choice in filtered)
+            {
+                if (choice.CanBeChecked)
+                {
+                    choice.IsChecked = true;
+                }
+            }
+
+            return;
+        }
+
+        switch (keyInfo.Key)
+        {
+            case ConsoleKey.UpArrow:
+                cursorIndex = filtered.Count > 0
+                                  ? (cursorIndex - 1 + filtered.Count) % filtered.Count
+                                  : 0;
+                break;
+            case ConsoleKey.DownArrow:
+                cursorIndex = filtered.Count > 0
+                                  ? (cursorIndex + 1) % filtered.Count
+                                  : 0;
+                break;
+            case ConsoleKey.LeftArrow:
+                if (searchable)
+                {
+                    textCursorIndex = Math.Max(0, textCursorIndex - 1);
+                }
+
+                break;
+            case ConsoleKey.RightArrow:
+                if (searchable)
+                {
+                    textCursorIndex = Math.Min(query.Length, textCursorIndex + 1);
+                }
+
+                break;
+            case ConsoleKey.Enter:
+                if (filtered.Count > 0)
+                {
+                    actionChoice = filtered[cursorIndex];
+                    isRunning    = false;
+                }
+
+                break;
+            case ConsoleKey.Escape:
+                // ⭐ Ayrım burada yapılır: işaretli satırlar var olsa da iptal.
+                cancelled = true;
+                isRunning = false;
+                break;
+            case ConsoleKey.Backspace:
+                if (searchable && textCursorIndex > 0)
+                {
+                    query = query[..(textCursorIndex - 1)] + query[textCursorIndex..];
+                    textCursorIndex--;
+                    cursorIndex = 0;
+                }
+
+                break;
+            case ConsoleKey.Delete:
+                if (searchable && textCursorIndex < query.Length)
+                {
+                    query       = query[..textCursorIndex] + query[(textCursorIndex + 1)..];
+                    cursorIndex = 0;
+                }
+
+                break;
+            default:
+                if (searchable && keyInfo.KeyChar != '\0' && !char.IsControl(keyInfo.KeyChar))
+                {
+                    query = query[..textCursorIndex] + keyInfo.KeyChar + query[textCursorIndex..];
+                    textCursorIndex++;
+                    cursorIndex = 0;
+                }
+
+                break;
+        }
     }
 
     public static DynamicPromptResult<T> ShowDynamic<T>(

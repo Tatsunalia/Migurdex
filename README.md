@@ -26,6 +26,7 @@ Terminalden Türkçe anime aramak ve izlemek için araç. TUI + yerel HTTP API +
 - AniList ve MAL ile bilgi/poster çekme ve izleme durumu eşitleme
 - MPV ile kaldığın yerden devam etme
 - Anime indirme desteği (TUI ve CLI, paralel MP4 + HLS)
+- TUI'de bir sezondan birden çok bölümü seçip sırayla indirme; diskteki bölümler atlanır
 - Geçmiş, favoriler, arama geçmişi
 - Discord RPC (ayarlanabilir)
 - Otomatik kaynak seçimi (sunucu / kalite / tür kuralları, uymazsa manuel liste)
@@ -108,6 +109,10 @@ Akış basit: Arama -> Detay -> Bölüm -> Oynat / İndir.
 
 `Esc` bir önceki ekrana döner. Yön tuşları + `Enter` ile kullanılıyor. İndirme sırasında `Esc` indirmeyi iptal eder;
 indirme MPV'yi açmaz ve izleme geçmişi/tracker senkronunu tetiklemez.
+
+Bölüm listesinde `Toplu indir` satırını seçerek mevcut sezondaki bölümleri işaretleyebilirsin:
+`Space` seçimi değiştirir, `Ctrl+A` görünen bölümlerin tümünü seçer, `Enter` indirmeyi başlatır.
+İndirme sırasında `Esc` kalan bölümleri durdurur; diskte zaten bulunan bölümler atlanır.
 
 ### Komut satırı modu (non-interactive)
 

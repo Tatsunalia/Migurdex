@@ -8,4 +8,17 @@ public class FuzzyChoice
     public object? AssociatedValue { get; set; }
 
     public bool IsAction { get; set; }
+
+    /// <summary>
+    /// Bu satır çoklu seçimde işaretlenebilir mi?
+    /// </summary>
+    /// <remarks>
+    /// ⭐ <c>false</c> ise satırda kutu çizilmez ve <c>Space</c> hiçbir şey
+    /// yapmaz; yalnız <c>Enter</c> seçer. Kısayol satırları
+    /// ("Tüm bölümlerini işaretle") böyle tanımlanır.
+    /// </remarks>
+    public bool CanBeChecked { get; set; }
+
+    /// <summary>Çoklu seçimde bu satır işaretli mi?</summary>
+    public bool IsChecked { get; set; }
 }
