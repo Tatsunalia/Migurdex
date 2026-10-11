@@ -17,7 +17,7 @@ public partial class FirestreamExtractor : IExtractor
 
     public FirestreamExtractor(M3U8PlaylistExtractor m3U8Extractor, ISharedBridge bridge)
     {
-        _httpClient    = bridge.CreateHttpClient();
+        _httpClient    = bridge.CreateHttpClient(x => x.AllowAutoRedirect = true);
         _m3U8Extractor = m3U8Extractor;
         _logger        = bridge.CreateLogger<FirestreamExtractor>();
     }
