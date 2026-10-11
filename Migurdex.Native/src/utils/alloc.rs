@@ -38,7 +38,20 @@ pub unsafe extern "C" fn rust_free_headers(ptr: *mut FfiHeader, len: usize) {
     if ptr.is_null() || len == 0 {
         return;
     }
-    let _ = unsafe { Vec::from_raw_parts(ptr, len, len) };
+    let headers = unsafe { std::slice::from_raw_parts(ptr, len) };
+    for h in headers {
+        if !h.key_ptr.is_null() && h.key_len > 0 {
+            if let Ok(layout) = Layout::from_size_align(h.key_len, 8) {
+                unsafe { dealloc(h.key_ptr as *mut u8, layout) };
+            }
+        }
+        if !h.val_ptr.is_null() && h.val_len > 0 {
+            if let Ok(layout) = Layout::from_size_align(h.val_len, 8) {
+                unsafe { dealloc(h.val_ptr as *mut u8, layout) };
+            }
+        }
+    }
+    let _ = unsafe { Box::from_raw(std::slice::from_raw_parts_mut(ptr, len)) };
 }
 
 pub fn to_raw_bytes(vec: Vec<u8>) -> (*mut u8, usize) {
@@ -60,12 +73,20 @@ pub fn to_raw_bytes(vec: Vec<u8>) -> (*mut u8, usize) {
     }
 }
 
-pub fn to_raw_layout<T>(mut vec: Vec<T>) -> (*mut T, usize) {
-    let len = vec.len();
+pub unsafe fn free_raw_bytes(ptr: *mut u8, len: usize) {
+    if ptr.is_null() || len == 0 {
+        return;
+    }
+    if let Ok(layout) = Layout::from_size_align(len, 8) {
+        unsafe { dealloc(ptr, layout) };
+    }
+}
+
+pub fn to_raw_layout<T>(vec: Vec<T>) -> (*mut T, usize) {
+    let slice = vec.into_boxed_slice();
+    let len = slice.len();
     if len == 0 {
         return (std::ptr::null_mut(), 0);
     }
-    let ptr = vec.as_mut_ptr();
-    std::mem::forget(vec);
-    (ptr, len)
+    (Box::into_raw(slice) as *mut T, len)
 }
