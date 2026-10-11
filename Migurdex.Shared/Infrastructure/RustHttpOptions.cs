@@ -5,9 +5,10 @@ namespace Migurdex.Shared.Infrastructure;
 
 public static partial class RustHttpOptions
 {
-    public static readonly HttpRequestOptionsKey<bool>   NoFollowKey       = new("Rust_NoFollow");
-    public static readonly HttpRequestOptionsKey<bool>   SkipCertVerifyKey = new("Rust_SkipCertVerify");
-    public static readonly HttpRequestOptionsKey<string> EmulationKey      = new("Rust_Emulation");
+    public static readonly HttpRequestOptionsKey<bool>   NoFollowKey         = new("Rust_NoFollow");
+    public static readonly HttpRequestOptionsKey<bool>   SkipCertVerifyKey   = new("Rust_SkipCertVerify");
+    public static readonly HttpRequestOptionsKey<bool>   NoDefaultHeadersKey = new("Rust_NoDefaultHeaders");
+    public static readonly HttpRequestOptionsKey<string> EmulationKey        = new("Rust_Emulation");
 
     extension(HttpRequestMessage request)
     {
@@ -20,6 +21,12 @@ public static partial class RustHttpOptions
         public HttpRequestMessage WithSkipCertVerify(bool skip = true)
         {
             request.Options.Set(SkipCertVerifyKey, skip);
+            return request;
+        }
+
+        public HttpRequestMessage WithNoDefaultHeaders(bool skip = true)
+        {
+            request.Options.Set(NoDefaultHeadersKey, skip);
             return request;
         }
 

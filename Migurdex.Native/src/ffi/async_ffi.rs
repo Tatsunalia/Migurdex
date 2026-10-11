@@ -46,11 +46,13 @@ pub unsafe extern "C" fn rust_send_async(
     let mut emulation = Profile::Chrome147;
     let mut no_follow = false;
     let mut skip_cert_verify = false;
+    let mut no_default_headers = false;
 
     if !options.is_null() {
         let opt = unsafe { &*options };
         no_follow = opt.no_follow;
         skip_cert_verify = opt.skip_cert_verify;
+        no_default_headers = opt.no_default_headers;
 
         if !opt.emulation_ptr.is_null() && opt.emulation_len > 0 {
             let emu_slice = unsafe { slice::from_raw_parts(opt.emulation_ptr, opt.emulation_len) };
@@ -78,13 +80,7 @@ pub unsafe extern "C" fn rust_send_async(
                 ""
             };
 
-            if key.eq_ignore_ascii_case("X-Rust-Emulate") {
-                emulation = parse_emulation(val);
-            } else if key.eq_ignore_ascii_case("X-Skip-Cert-Verify") {
-                if val.eq_ignore_ascii_case("true") || val == "1" {
-                    skip_cert_verify = true;
-                }
-            } else if !key.is_empty() {
+            if !key.is_empty() {
                 req_headers.push((key.to_string(), val.to_string()));
             }
         }
@@ -105,6 +101,10 @@ pub unsafe extern "C" fn rust_send_async(
 
         for (k, v) in req_headers {
             builder = builder.header(k, v);
+        }
+
+        if no_default_headers {
+            builder = builder.default_headers(false);
         }
 
         match builder.send().await {

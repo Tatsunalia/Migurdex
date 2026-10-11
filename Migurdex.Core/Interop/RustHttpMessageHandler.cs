@@ -151,6 +151,12 @@ public class RustHttpMessageHandler : HttpMessageHandler
             skipCertVerify = legacyScv;
         }
 
+        var noDefaultHeaders = false;
+        if (request.Options.TryGetValue(RustHttpOptions.NoDefaultHeadersKey, out var ndhValue))
+        {
+            noDefaultHeaders = ndhValue;
+        }
+
         string? emulation = null;
         if (request.Options.TryGetValue(RustHttpOptions.EmulationKey, out var emuValue))
         {
@@ -199,10 +205,11 @@ public class RustHttpMessageHandler : HttpMessageHandler
                     {
                         new()
                         {
-                            NoFollow       = noFollow,
-                            SkipCertVerify = skipCertVerify,
-                            EmulationPtr   = emuBytes.Length > 0 ? emuPtr : (byte*) 0,
-                            EmulationLen   = (nuint) emuBytes.Length
+                            NoFollow         = noFollow,
+                            SkipCertVerify   = skipCertVerify,
+                            NoDefaultHeaders = noDefaultHeaders,
+                            EmulationPtr     = emuBytes.Length > 0 ? emuPtr : (byte*) 0,
+                            EmulationLen     = (nuint) emuBytes.Length
                         }
                     };
 

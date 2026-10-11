@@ -32,7 +32,10 @@ public class SharedBridge : ISharedBridge
         HttpMessageHandler innermostHandler = new NonDisposableHttpMessageHandler(_rustHandler);
 
         innermostHandler =
-            new RustHttpDefaultOptionsHandler(innermostHandler, options.SkipCertVerify, options.Emulation);
+            new RustHttpDefaultOptionsHandler(innermostHandler,
+                                              options.SkipCertVerify,
+                                              options.Emulation,
+                                              options.SkipDefaultHeaders);
 
         if (ClearanceStore is not null)
         {

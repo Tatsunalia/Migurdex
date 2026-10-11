@@ -28,6 +28,9 @@ public unsafe struct FfiRequestOptions
     [MarshalAs(UnmanagedType.I1)]
     public bool SkipCertVerify;
 
+    [MarshalAs(UnmanagedType.I1)]
+    public bool NoDefaultHeaders;
+
     public byte* EmulationPtr;
     public nuint EmulationLen;
 }
@@ -48,12 +51,8 @@ public unsafe struct FfiResponse
 [StructLayout(LayoutKind.Sequential)]
 public unsafe struct RustApi
 {
-    public delegate* unmanaged<byte*, byte*, NativeBuffer>        FetchUrl;
-    public delegate* unmanaged<byte*, byte*, byte*, NativeBuffer> FetchUrlPost;
-    public delegate* unmanaged<byte*, nuint, void>                RustFree;
-    public delegate* unmanaged<nuint, byte*>                      RustAlloc;
-    public delegate* unmanaged<byte*, byte*, NativeBuffer>        FetchUrlNoFollow;
-    public delegate* unmanaged<byte*, NativeBuffer>               FetchBatch;
+    public delegate* unmanaged<byte*, nuint, void> RustFree;
+    public delegate* unmanaged<nuint, byte*>       RustAlloc;
 
     public delegate* unmanaged<long, byte*, nuint, byte*, nuint, FfiHeader*, nuint, byte*, nuint, FfiRequestOptions*,
         delegate*

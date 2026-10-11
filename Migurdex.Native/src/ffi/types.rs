@@ -24,6 +24,7 @@ pub struct FfiResponse {
 pub struct FfiRequestOptions {
     pub no_follow: bool,
     pub skip_cert_verify: bool,
+    pub no_default_headers: bool,
     pub emulation_ptr: *const u8,
     pub emulation_len: usize,
 }
@@ -38,12 +39,8 @@ pub struct NativeBuffer {
 
 #[repr(C)]
 pub struct RustApi {
-    pub fetch_url: extern "C" fn(*const c_char, *const c_char) -> NativeBuffer,
-    pub fetch_url_post: extern "C" fn(*const c_char, *const c_char, *const c_char) -> NativeBuffer,
     pub rust_free: extern "C" fn(*mut u8, usize),
     pub rust_alloc: extern "C" fn(usize) -> *mut u8,
-    pub fetch_url_no_follow: extern "C" fn(*const c_char, *const c_char) -> NativeBuffer,
-    pub fetch_batch: extern "C" fn(*const c_char) -> NativeBuffer,
     pub rust_send_async: unsafe extern "C" fn(
         i64,
         *const u8,
