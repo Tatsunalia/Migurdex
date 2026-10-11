@@ -15,7 +15,11 @@ public partial class RumbleExtractor : IExtractor
 
     public RumbleExtractor(M3U8PlaylistExtractor m3U8Extractor, ISharedBridge bridge)
     {
-        _httpClient    = bridge.CreateHttpClient();
+        _httpClient = bridge.CreateHttpClient(x =>
+        {
+            x.Emulation = BrowserEmulation.Firefox147;
+        });
+
         _m3U8Extractor = m3U8Extractor;
         _logger        = bridge.CreateLogger<RumbleExtractor>();
     }
@@ -36,16 +40,20 @@ public partial class RumbleExtractor : IExtractor
         try
         {
             var referer = headers.GetReferer();
+            if (string.IsNullOrEmpty(referer))
+            {
+                referer = "https://rumble.com/";
+            }
+
             _logger.LogDebug("fetching Rumble embed page: {Url}", url);
 
             var request = new HttpRequestMessage(HttpMethod.Get, url);
             request.Headers.Add("User-Agent",
-                                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
-
-            if (!string.IsNullOrEmpty(referer))
-            {
-                request.Headers.Add("Referer", referer);
-            }
+                                "Mozilla/5.0 (X11; Linux x86_64; rv:157.0) Gecko/20100101 Firefox/157.0");
+            request.Headers.Add("Accept",
+                                "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8");
+            request.Headers.Add("Accept-Language", "en-US,en;q=0.5");
+            request.Headers.Add("Referer", referer);
 
             var response = await _httpClient.SendAsync(request, cancellationToken);
             if (!response.IsSuccessStatusCode)
@@ -80,8 +88,14 @@ public partial class RumbleExtractor : IExtractor
                 var extractedSources = await _m3U8Extractor.ExtractAsync(m3U8Url,
                                                                          new Dictionary<string, string>
                                                                          {
-                                                                             { "Referer", "https://rumble.com/" }
-                                                                         });
+                                                                             { "Referer", "https://rumble.com/" },
+                                                                             {
+                                                                                 "User-Agent",
+                                                                                 "Mozilla/5.0 (X11; Linux x86_64; rv:157.0) Gecko/20100101 Firefox/157.0"
+                                                                             }
+                                                                         },
+                                                                         cancellationToken,
+                                                                         client: _httpClient);
                 sources.AddRange(extractedSources);
 
                 if (sources.Count == 0)
@@ -95,13 +109,19 @@ public partial class RumbleExtractor : IExtractor
                 }
             }
 
-            var mp4Matches = Mp4UrlRegex().Matches(html);
+            var mp4Matches  = Mp4UrlRegex().Matches(html);
+            var seenMp4Urls = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
             foreach (Match match in mp4Matches)
             {
                 var mp4Url  = match.Groups[1].Value.Replace(@"\/", "/").Replace(@"\", "");
                 var height  = match.Groups[2].Value;
                 var quality = $"{height}p";
+
+                if (!seenMp4Urls.Add(mp4Url))
+                {
+                    continue;
+                }
 
                 sources.Add(new VideoSource
                 {
