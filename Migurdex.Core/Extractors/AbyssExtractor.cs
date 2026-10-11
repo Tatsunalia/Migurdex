@@ -17,8 +17,12 @@ public partial class AbyssExtractor : IExtractor
 
     public AbyssExtractor(ISharedBridge bridge)
     {
-        _httpClient = bridge.CreateHttpClient();
-        _logger     = bridge.CreateLogger<AbyssExtractor>();
+        _httpClient = bridge.CreateHttpClient(x =>
+        {
+            x.Emulation = BrowserEmulation.Chrome147;
+        });
+
+        _logger = bridge.CreateLogger<AbyssExtractor>();
     }
 
     public string Name => "Abyss";
@@ -40,7 +44,12 @@ public partial class AbyssExtractor : IExtractor
 
         try
         {
-            var referer       = headers.GetReferer();
+            var referer = headers.GetReferer();
+            if (string.IsNullOrEmpty(referer))
+            {
+                referer = "https://anizm.net/";
+            }
+
             var normalizedUrl = url;
 
             var vMatch = VParamRegex().Match(url);
@@ -81,8 +90,6 @@ public partial class AbyssExtractor : IExtractor
                              referer);
 
             var request = new HttpRequestMessage(HttpMethod.Get, normalizedUrl);
-            request.Headers.Add("User-Agent",
-                                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
 
             if (!string.IsNullOrEmpty(referer))
             {
@@ -167,15 +174,13 @@ public partial class AbyssExtractor : IExtractor
             aes.Mode    = CipherMode.ECB;
             aes.Padding = PaddingMode.None;
 
-            var aesKeyBytes     = new byte[32];
-            var counterBuffer   = new byte[16];
-            var keyStreamBuffer = new byte[16];
+            var aesKeyBytes = new byte[32];
 
             foreach (var keyString in highPriorityKeys)
             {
                 GetMd5HexBytes(keyString, aesKeyBytes);
 
-                if (TryDecryptKey(aes, encryptedBytes, aesKeyBytes, counterBuffer, keyStreamBuffer, out decryptedBytes))
+                if (TryDecryptKey(aes, encryptedBytes, aesKeyBytes, out decryptedBytes))
                 {
                     decryptedStr      = Encoding.UTF8.GetString(decryptedBytes!);
                     decryptionSuccess = true;
@@ -198,12 +203,7 @@ public partial class AbyssExtractor : IExtractor
                         var keyString = $"{possibleUserId}:{slug}:{idStr}";
                         GetMd5HexBytes(keyString, aesKeyBytes);
 
-                        if (TryDecryptKey(aes,
-                                          encryptedBytes,
-                                          aesKeyBytes,
-                                          counterBuffer,
-                                          keyStreamBuffer,
-                                          out decryptedBytes))
+                        if (TryDecryptKey(aes, encryptedBytes, aesKeyBytes, out decryptedBytes))
                         {
                             decryptedStr      = Encoding.UTF8.GetString(decryptedBytes!);
                             decryptionSuccess = true;
@@ -235,8 +235,25 @@ public partial class AbyssExtractor : IExtractor
 
             if (mediaRoot.TryGetProperty("mp4", out var mp4Prop) && mp4Prop.ValueKind == JsonValueKind.Object)
             {
-                if (mediaRoot.TryGetProperty("mp4", out var mp4Obj)
-                    && mp4Obj.TryGetProperty("sources", out var sourcesProp)
+                List<string>? domains = null;
+                if (mp4Prop.TryGetProperty("domains", out var domainsProp)
+                    && domainsProp.ValueKind == JsonValueKind.Array)
+                {
+                    domains = new List<string>();
+                    foreach (var domainProp in domainsProp.EnumerateArray())
+                    {
+                        var domain = domainProp.ValueKind == JsonValueKind.String
+                                         ? domainProp.GetString()
+                                         : null;
+
+                        if (!string.IsNullOrEmpty(domain))
+                        {
+                            domains.Add(domain);
+                        }
+                    }
+                }
+
+                if (mp4Prop.TryGetProperty("sources", out var sourcesProp)
                     && sourcesProp.ValueKind == JsonValueKind.Array)
                 {
                     foreach (var source in sourcesProp.EnumerateArray())
@@ -245,6 +262,22 @@ public partial class AbyssExtractor : IExtractor
                         if (source.TryGetProperty("label", out var lProp))
                         {
                             label = lProp.GetString();
+                        }
+
+                        if (source.TryGetProperty("codec", out var codecProp)
+                            && string.Equals(codecProp.GetString(),
+                                             "av1",
+                                             StringComparison.OrdinalIgnoreCase))
+                        {
+                            continue;
+                        }
+
+                        string? resId = null;
+                        if (source.TryGetProperty("res_id", out var resIdProp))
+                        {
+                            resId = resIdProp.ValueKind == JsonValueKind.Number
+                                        ? resIdProp.GetInt64().ToString()
+                                        : resIdProp.GetString();
                         }
 
                         string? directBaseUrl = null;
@@ -257,6 +290,12 @@ public partial class AbyssExtractor : IExtractor
                         if (source.TryGetProperty("path", out var pathProp))
                         {
                             directPath = pathProp.GetString();
+                        }
+
+                        string? sub = null;
+                        if (source.TryGetProperty("sub", out var subProp))
+                        {
+                            sub = subProp.GetString();
                         }
 
                         if (!source.TryGetProperty("size", out var sizeProp)
@@ -274,6 +313,51 @@ public partial class AbyssExtractor : IExtractor
                             continue;
                         }
 
+                        long? sizeBytes = null;
+                        if (long.TryParse(sizeStr, out var parsedSize))
+                        {
+                            sizeBytes = parsedSize;
+                        }
+
+                        string? soraUrl = null;
+                        if (!string.IsNullOrEmpty(resId)
+                            && !string.IsNullOrEmpty(sub)
+                            && domains is { Count: > 0 })
+                        {
+                            var domain = domains.FirstOrDefault(x => x.Contains(sub,
+                                                                    StringComparison.OrdinalIgnoreCase));
+
+                            if (!string.IsNullOrEmpty(domain))
+                            {
+                                var soraPath  = $"/mp4/{md5Id}/{resId}/{sizeStr}?v={slug}";
+                                var soraToken = BuildSoraToken(aes, soraPath, sizeStr);
+
+                                if (!string.IsNullOrEmpty(soraToken))
+                                {
+                                    soraUrl = $"https://{domain.TrimEnd('/')}/sora/{sizeStr}/{soraToken}";
+                                }
+                            }
+                        }
+
+                        if (!string.IsNullOrEmpty(soraUrl))
+                        {
+                            sources.Add(new VideoSource
+                            {
+                                Url       = soraUrl,
+                                Quality   = $"{label ?? "Auto"}",
+                                Type      = VideoType.Mp4,
+                                SizeBytes = sizeBytes,
+                                Headers = new Dictionary<string, string>
+                                {
+                                    { "Referer", "https://player.abyssplayer.com/" }
+                                }
+                            });
+
+                            continue;
+                        }
+
+                        // AES-CTR encrypted bytes, needs decrypt on download
+                        /*
                         if (string.IsNullOrEmpty(directBaseUrl) || string.IsNullOrEmpty(directPath))
                         {
                             continue;
@@ -282,15 +366,19 @@ public partial class AbyssExtractor : IExtractor
                         var directCombinedUrl = $"{directBaseUrl.TrimEnd('/')}/{directPath.TrimStart('/')}";
                         sources.Add(new VideoSource
                         {
-                            Url     = directCombinedUrl,
-                            Quality = $"{label ?? "Auto"}",
-                            Type    = VideoType.Mp4,
+                            Url       = directCombinedUrl,
+                            Quality   = $"{label ?? "Auto"}",
+                            Type      = VideoType.Mp4,
+                            SizeBytes = sizeBytes,
                             Headers = new Dictionary<string, string>
                             {
                                 { "Referer", "https://abysscdn.com/" }
                             }
                         });
+                        */
                     }
+
+                    sources.Sort((a, b) => (b.SizeBytes ?? 0).CompareTo(a.SizeBytes ?? 0));
                 }
             }
         }
@@ -332,12 +420,7 @@ public partial class AbyssExtractor : IExtractor
         Span<byte> hashBytes = stackalloc byte[16];
         MD5.HashData(inputBytes[..bytesWritten], hashBytes);
 
-        for (var i = 0; i < 16; i++)
-        {
-            var b = hashBytes[i];
-            destination[i * 2]       = GetHexCharByte(b >> 4);
-            destination[(i * 2) + 1] = GetHexCharByte(b & 0x0F);
-        }
+        WriteHexLower(hashBytes, destination);
     }
 
     private static byte GetHexCharByte(int val)
@@ -345,70 +428,76 @@ public partial class AbyssExtractor : IExtractor
         return (byte) (val < 10 ? '0' + val : 'a' + (val - 10));
     }
 
-    private static bool TryDecryptKey(
-        Aes         aes,
-        byte[]      ciphertext,
-        byte[]      key,
-        byte[]      counter,
-        byte[]      keyStream,
-        out byte[]? decryptedBytes)
+    private static string? BuildSoraToken(Aes aes, string path, string size)
     {
-        decryptedBytes = null;
-        aes.Key        = key;
+        try
+        {
+            Span<byte> keyBytes = stackalloc byte[32];
+            GetSoraKeyBytes(size, keyBytes);
+
+            var keyArray  = keyBytes.ToArray();
+            var plainText = Encoding.UTF8.GetBytes(path);
+            var cipher    = AesCtrCrypt(aes, keyArray, plainText);
+
+            var first  = Convert.ToBase64String(cipher).Replace("=", string.Empty);
+            var second = Convert.ToBase64String(Encoding.ASCII.GetBytes(first)).Replace("=", string.Empty);
+
+            return second;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static void GetSoraKeyBytes(string size, Span<byte> destination)
+    {
+        Span<byte> seed = stackalloc byte[size.Length];
+        for (var i = 0; i < size.Length; i++)
+        {
+            var c = size[i];
+            seed[i] = c is >= '0' and <= '9' ? (byte) (c - '0') : (byte) c;
+        }
+
+        Span<byte> hashBytes = stackalloc byte[16];
+        MD5.HashData(seed, hashBytes);
+
+        WriteHexLower(hashBytes, destination);
+    }
+
+    private static void WriteHexLower(ReadOnlySpan<byte> hash, Span<byte> destination)
+    {
+        for (var i = 0; i < hash.Length; i++)
+        {
+            var b = hash[i];
+            destination[i * 2]       = GetHexCharByte(b >> 4);
+            destination[(i * 2) + 1] = GetHexCharByte(b & 0x0F);
+        }
+    }
+
+    private static byte[] AesCtrCrypt(Aes aes, byte[] key, byte[] input)
+    {
+        aes.Key = key;
 
         using var encryptor = aes.CreateEncryptor();
 
+        var counter   = new byte[16];
+        var keyStream = new byte[16];
         Buffer.BlockCopy(key, 0, counter, 0, 16);
 
-        encryptor.TransformBlock(counter, 0, 16, keyStream, 0);
+        var output     = new byte[input.Length];
+        var blockCount = (input.Length + 15) / 16;
 
-        var  firstBlockSize = Math.Min(16, ciphertext.Length);
-        byte firstJsonByte  = 0;
-        for (var i = 0; i < firstBlockSize; i++)
-        {
-            var decryptedByte = (byte) (ciphertext[i] ^ keyStream[i]);
-
-            if (decryptedByte is 0x20 or 0x09 or 0x0D or 0x0A)
-            {
-                continue;
-            }
-
-            firstJsonByte = decryptedByte;
-
-            break;
-        }
-
-        if (firstJsonByte is not 0x7B and not 0x5B)
-        {
-            return false;
-        }
-
-        decryptedBytes = new byte[ciphertext.Length];
-
-        for (var j = 0; j < firstBlockSize; j++)
-        {
-            decryptedBytes[j] = (byte) (ciphertext[j] ^ keyStream[j]);
-        }
-
-        for (var k = 15; k >= 0; k--)
-        {
-            if (++counter[k] != 0)
-            {
-                break;
-            }
-        }
-
-        var blockCount = (ciphertext.Length + 15) / 16;
-        for (var i = 1; i < blockCount; i++)
+        for (var i = 0; i < blockCount; i++)
         {
             encryptor.TransformBlock(counter, 0, 16, keyStream, 0);
 
             var offset         = i * 16;
-            var bytesToProcess = Math.Min(16, ciphertext.Length - offset);
+            var bytesToProcess = Math.Min(16, input.Length - offset);
 
             for (var j = 0; j < bytesToProcess; j++)
             {
-                decryptedBytes[offset + j] = (byte) (ciphertext[offset + j] ^ keyStream[j]);
+                output[offset + j] = (byte) (input[offset + j] ^ keyStream[j]);
             }
 
             for (var k = 15; k >= 0; k--)
@@ -420,6 +509,32 @@ public partial class AbyssExtractor : IExtractor
             }
         }
 
-        return true;
+        return output;
+    }
+
+    private static bool TryDecryptKey(Aes aes, byte[] ciphertext, byte[] key, out byte[]? decryptedBytes)
+    {
+        decryptedBytes = AesCtrCrypt(aes, key, ciphertext);
+
+        for (var i = 0; i < decryptedBytes.Length; i++)
+        {
+            var b = decryptedBytes[i];
+
+            if (b is 0x20 or 0x09 or 0x0D or 0x0A)
+            {
+                continue;
+            }
+
+            if (b is not 0x7B and not 0x5B)
+            {
+                decryptedBytes = null;
+            }
+
+            return b is 0x7B or 0x5B;
+        }
+
+        decryptedBytes = null;
+
+        return false;
     }
 }
