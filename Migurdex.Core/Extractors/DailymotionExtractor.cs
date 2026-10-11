@@ -1,4 +1,6 @@
 using Microsoft.Extensions.Logging;
+using Migurdex.Shared.Diagnostics;
+using Migurdex.Shared.Enums;
 using Migurdex.Shared.Interfaces;
 using Migurdex.Shared.Models;
 using System.Text.Json;
@@ -47,6 +49,8 @@ public class DailymotionExtractor : IExtractor
                 videoId = url.Split("dai.ly/").LastOrDefault()?.Split('?').FirstOrDefault();
             }
 
+            videoId = string.IsNullOrEmpty(videoId) ? GetQueryVideoId(url) : videoId;
+
             if (string.IsNullOrEmpty(videoId))
             {
                 _logger.LogWarning("could not extract video ID from URL: {Url}", url);
@@ -74,13 +78,19 @@ public class DailymotionExtractor : IExtractor
             var jsonContent = await response.Content.ReadAsStringAsync(cancellationToken);
             var metadata    = JsonSerializer.Deserialize<DailymotionMetadata>(jsonContent);
 
+            if (!string.IsNullOrEmpty(metadata?.Error?.Title) || !string.IsNullOrEmpty(metadata?.Error?.Message))
+            {
+                var reason = $"{metadata?.Error?.Title} {metadata?.Error?.Message}";
+
+                throw new ExtractionException(UpstreamErrorClassifier.Detect(200, reason),
+                                              UpstreamErrorClassifier.Summarize(reason));
+            }
+
             var m3U8Url = metadata?.Qualities?.Auto?.FirstOrDefault()?.Url;
             if (string.IsNullOrEmpty(m3U8Url))
             {
-                _logger.LogWarning("could not find M3U8 URL in metadata for video ID: {VideoId}",
-                                   videoId);
-
-                return sources;
+                throw new ExtractionException(UpstreamErrorKind.UpstreamChanged,
+                                                  $"metadata okundu ancak M3U8 yok (video ID: {videoId})");
             }
 
             _logger.LogInformation("found M3U8 URL: {M3u8Url}", m3U8Url);
@@ -118,6 +128,10 @@ public class DailymotionExtractor : IExtractor
                 }
             }
         }
+        catch (ExtractionException)
+        {
+            throw;
+        }
         catch (Exception ex)
         {
             _logger.LogError(ex, "failed to extract video sources for: {Url}", url);
@@ -126,8 +140,40 @@ public class DailymotionExtractor : IExtractor
         return sources;
     }
 
+    private static string? GetQueryVideoId(string url)
+    {
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) || string.IsNullOrEmpty(uri.Query))
+        {
+            return null;
+        }
+
+        foreach (var pair in uri.Query.TrimStart('?').Split('&', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var eq = pair.IndexOf('=');
+            if (eq <= 0)
+            {
+                continue;
+            }
+
+            var key = pair[..eq];
+            if (key is "video" or "v")
+            {
+                var value = Uri.UnescapeDataString(pair[(eq + 1)..]);
+                if (!string.IsNullOrWhiteSpace(value))
+                {
+                    return value.Trim();
+                }
+            }
+        }
+
+        return null;
+    }
+
     private class DailymotionMetadata
     {
+        [JsonPropertyName("error")]
+        public DailymotionError? Error { get; set; }
+
         [JsonPropertyName("qualities")]
         public DailymotionQualities? Qualities { get; set; }
 
@@ -148,6 +194,15 @@ public class DailymotionExtractor : IExtractor
 
         [JsonPropertyName("url")]
         public string? Url { get; set; }
+    }
+
+    private class DailymotionError
+    {
+        [JsonPropertyName("title")]
+        public string? Title { get; set; }
+
+        [JsonPropertyName("message")]
+        public string? Message { get; set; }
     }
 
     private class DailymotionSubtitlesInfo

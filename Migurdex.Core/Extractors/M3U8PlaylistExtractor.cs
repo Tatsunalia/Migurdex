@@ -14,8 +14,6 @@ public partial class M3U8PlaylistExtractor : IExtractor
 {
     private static readonly HashSet<string> _nonTransferableHeaders = new(StringComparer.OrdinalIgnoreCase)
     {
-        // Bağlantıya özel, gövde uzunluğunu belirleyen veya içeriği sıkıştıran
-        // header'lar playlist isteğinden medya indirmesine taşınmamalıdır.
         "accept-encoding",
         "connection",
         "content-length",
@@ -42,6 +40,81 @@ public partial class M3U8PlaylistExtractor : IExtractor
 
     public string Name => "M3U8Playlist";
 
+    public sealed record HlsVariant(
+        string  Quality,
+        int     Width,
+        int     Height,
+        long?   Bitrate,
+        string? VideoCodec,
+        string? AudioCodec,
+        string  Url);
+
+    public static List<HlsVariant> ParseMaster(string content, string baseUrl)
+    {
+        var baseUri  = new Uri(baseUrl);
+        var variants = new List<HlsVariant>();
+
+        var lines = content.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+        for (var i = 0; i < lines.Length - 1; i++)
+        {
+            var line = lines[i].Trim();
+            if (!line.StartsWith("#EXT-X-STREAM-INF", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var segmentLine = lines[i + 1].Trim();
+            if (string.IsNullOrEmpty(segmentLine) || segmentLine.StartsWith("#"))
+            {
+                continue;
+            }
+
+            var quality  = "Auto";
+            var width    = 0;
+            var height   = 0;
+            var resMatch = ResolutionRegex().Match(line);
+            if (resMatch.Success)
+            {
+                var parts = resMatch.Groups[1].Value.Split('x');
+                if (parts.Length == 2
+                    && int.TryParse(parts[0], out var parsedWidth)
+                    && int.TryParse(parts[1], out var parsedHeight))
+                {
+                    width   = parsedWidth;
+                    height  = parsedHeight;
+                    quality = $"{parsedHeight}p";
+                }
+            }
+
+            var bitrate = ParseBandwidth(line);
+            var (videoCodec, audioCodec) = ParseCodecs(line);
+
+            string segUrl;
+            if (Uri.TryCreate(baseUri, segmentLine, out var combinedUri))
+            {
+                segUrl = string.IsNullOrEmpty(combinedUri.Query) && !string.IsNullOrEmpty(baseUri.Query)
+                             ? combinedUri.AbsoluteUri + baseUri.Query
+                             : combinedUri.AbsoluteUri;
+            }
+            else
+            {
+                segUrl = segmentLine.StartsWith("http", StringComparison.OrdinalIgnoreCase)
+                             ? segmentLine
+                             : baseUri + "/" + segmentLine;
+
+                if (!segUrl.Contains('?') && !string.IsNullOrEmpty(baseUri.Query))
+                {
+                    segUrl += baseUri.Query;
+                }
+            }
+
+            variants.Add(new HlsVariant(quality, width, height, bitrate, videoCodec, audioCodec, segUrl));
+            i++;
+        }
+
+        return variants;
+    }
+
     public bool CanExtract(string url)
     {
         return url.Contains(".m3u8", StringComparison.OrdinalIgnoreCase)
@@ -52,7 +125,16 @@ public partial class M3U8PlaylistExtractor : IExtractor
         IDictionary<string, string>?                         headers           = null,
         CancellationToken                                    cancellationToken = default)
     {
-        var sources = await ExtractPlaylistAsync(url, headers, cancellationToken);
+        return await ExtractAsync(url, headers, cancellationToken, client: null);
+    }
+
+
+    public async Task<List<VideoSource>> ExtractAsync(string url,
+        IDictionary<string, string>?                         headers,
+        CancellationToken                                    cancellationToken,
+        HttpClient?                                          client)
+    {
+        var sources = await ExtractPlaylistAsync(url, headers, cancellationToken, client);
 
         foreach (var source in sources)
         {
@@ -63,31 +145,39 @@ public partial class M3U8PlaylistExtractor : IExtractor
     }
 
     private async Task<List<VideoSource>> ExtractPlaylistAsync(string url,
-        IDictionary<string, string>?                         headers,
-        CancellationToken                                    cancellationToken)
+        IDictionary<string, string>?                                  headers,
+        CancellationToken                                             cancellationToken,
+        HttpClient?                                                   client = null)
     {
         var sources = new List<VideoSource>();
+        var http    = client ?? _httpClient;
 
         try
         {
-            var baseUri = new Uri(url);
+            var       baseUri = new Uri(url);
             using var request = new HttpRequestMessage(HttpMethod.Get, url);
 
-            var userAgent =
-                headers?.TryGetValue("User-Agent", out var customUa) == true
-                && !string.IsNullOrWhiteSpace(customUa)
-                    ? customUa
-                    : "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:151.0) Gecko/20100101 Firefox/151.0";
+            if (client is null)
+            {
+                var userAgent =
+                    headers?.TryGetValue("User-Agent", out var customUa) == true
+                    && !string.IsNullOrWhiteSpace(customUa)
+                        ? customUa
+                        : "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:151.0) Gecko/20100101 Firefox/151.0";
 
-            request.Headers.TryAddWithoutValidation("User-Agent", userAgent);
-            request.Headers.Add("Accept", "*/*");
-            request.Headers.Add("Accept-Language", "en-US,en;q=0.9");
+                request.Headers.TryAddWithoutValidation("User-Agent", userAgent);
+                request.Headers.Add("Accept", "*/*");
+                request.Headers.Add("Accept-Language", "en-US,en;q=0.9");
+            }
+
             request.AddHeaders(headers);
 
-            using var response = await _httpClient.SendAsync(request, cancellationToken);
+            using var response = await http.SendAsync(request, cancellationToken);
             if (!response.IsSuccessStatusCode)
             {
-                _logger.LogWarning("M3U8 playlist request failed.");
+                _logger.LogWarning("M3U8 playlist request failed: {StatusCode} for {Host}",
+                                   response.StatusCode,
+                                   baseUri.Host);
 
                 return sources;
             }
@@ -101,71 +191,7 @@ public partial class M3U8PlaylistExtractor : IExtractor
             var hasSeparateAudio =
                 AudioMediaRegex().IsMatch(content);
 
-            var lines    = content.Split('\n', StringSplitOptions.RemoveEmptyEntries);
-            var variants = new List<(string Quality,
-                                    int Width,
-                                    int Height,
-                                    long? Bitrate,
-                                    string? VideoCodec,
-                                    string? AudioCodec,
-                                    string Url)>();
-
-            for (var i = 0; i < lines.Length - 1; i++)
-            {
-                var line = lines[i].Trim();
-                if (!line.StartsWith("#EXT-X-STREAM-INF", StringComparison.OrdinalIgnoreCase))
-                {
-                    continue;
-                }
-
-                var segmentLine = lines[i + 1].Trim();
-                if (string.IsNullOrEmpty(segmentLine) || segmentLine.StartsWith("#"))
-                {
-                    continue;
-                }
-
-                var quality  = "Auto";
-                var width    = 0;
-                var height   = 0;
-                var resMatch = ResolutionRegex().Match(line);
-                if (resMatch.Success)
-                {
-                    var parts = resMatch.Groups[1].Value.Split('x');
-                    if (parts.Length == 2
-                        && int.TryParse(parts[0], out var parsedWidth)
-                        && int.TryParse(parts[1], out var parsedHeight))
-                    {
-                        width   = parsedWidth;
-                        height  = parsedHeight;
-                        quality = $"{parsedHeight}p";
-                    }
-                }
-
-                var bitrate = ParseBandwidth(line);
-                var (videoCodec, audioCodec) = ParseCodecs(line);
-
-                string segUrl;
-                if (Uri.TryCreate(baseUri, segmentLine, out var combinedUri))
-                {
-                    segUrl = string.IsNullOrEmpty(combinedUri.Query) && !string.IsNullOrEmpty(baseUri.Query)
-                                 ? combinedUri.AbsoluteUri + baseUri.Query
-                                 : combinedUri.AbsoluteUri;
-                }
-                else
-                {
-                    segUrl = segmentLine.StartsWith("http", StringComparison.OrdinalIgnoreCase)
-                                 ? segmentLine
-                                 : baseUri + "/" + segmentLine;
-
-                    if (!segUrl.Contains('?') && !string.IsNullOrEmpty(baseUri.Query))
-                    {
-                        segUrl += baseUri.Query;
-                    }
-                }
-
-                variants.Add((quality, width, height, bitrate, videoCodec, audioCodec, segUrl));
-                i++;
-            }
+            var variants = ParseMaster(content, url);
 
             if (variants.Count > 0)
             {
@@ -173,7 +199,7 @@ public partial class M3U8PlaylistExtractor : IExtractor
                                          .ThenByDescending(v => v.Bitrate ?? 0)
                                          .First();
                 var maxQuality   = maxVariant.Height > 0 ? $"{maxVariant.Height}p" : "Auto";
-                var mediaSeconds = await TryGetVariantDurationAsync(maxVariant.Url, headers, cancellationToken);
+                var mediaSeconds = await TryGetVariantDurationAsync(maxVariant.Url, headers, cancellationToken, client);
 
                 if (hasSeparateAudio)
                 {
@@ -226,6 +252,7 @@ public partial class M3U8PlaylistExtractor : IExtractor
             else
             {
                 var quality = "Auto";
+                var lines   = content.Split('\n', StringSplitOptions.RemoveEmptyEntries);
                 var firstSegment = lines.FirstOrDefault(l => !l.StartsWith('#') && !string.IsNullOrWhiteSpace(l))
                                         ?.Trim();
                 if (!string.IsNullOrEmpty(firstSegment))
@@ -249,7 +276,8 @@ public partial class M3U8PlaylistExtractor : IExtractor
                         }
                     }
 
-                    var detectedQuality = await TryDetectQualityFromTsSegmentAsync(segUrl, headers, cancellationToken);
+                    var detectedQuality =
+                        await TryDetectQualityFromTsSegmentAsync(segUrl, headers, cancellationToken, client);
                     if (!string.IsNullOrEmpty(detectedQuality))
                     {
                         quality = detectedQuality;
@@ -332,8 +360,10 @@ public partial class M3U8PlaylistExtractor : IExtractor
         string? video = null;
         string? audio = null;
 
-        var parts = match.Groups[1].Value.Split(',', StringSplitOptions.RemoveEmptyEntries
-                                                     | StringSplitOptions.TrimEntries);
+        var parts = match.Groups[1]
+                         .Value.Split(',',
+                                      StringSplitOptions.RemoveEmptyEntries
+                                      | StringSplitOptions.TrimEntries);
         foreach (var part in parts)
         {
             var tag    = part.Split('.')[0].Trim().ToLowerInvariant();
@@ -360,17 +390,17 @@ public partial class M3U8PlaylistExtractor : IExtractor
     {
         return tag.ToLowerInvariant() switch
         {
-            "avc1"            => "H.264",
-            "hev1" or "hvc1"  => "H.265",
-            "vp09"            => "VP9",
-            "av01"            => "AV1",
-            "mp4v"            => "MPEG-4",
-            "mp4a"            => "AAC",
-            "ec-3" or "ec3"   => "E-AC-3",
-            "ac-3" or "ac3"   => "AC-3",
-            "opus"            => "Opus",
-            "vorbis"          => "Vorbis",
-            _                 => null
+            "avc1"           => "H.264",
+            "hev1" or "hvc1" => "H.265",
+            "vp09"           => "VP9",
+            "av01"           => "AV1",
+            "mp4v"           => "MPEG-4",
+            "mp4a"           => "AAC",
+            "ec-3" or "ec3"  => "E-AC-3",
+            "ac-3" or "ac3"  => "AC-3",
+            "opus"           => "Opus",
+            "vorbis"         => "Vorbis",
+            _                => null
         };
     }
 
@@ -392,8 +422,8 @@ public partial class M3U8PlaylistExtractor : IExtractor
                 continue;
             }
 
-            var value = line["#EXTINF:".Length..];
-            var comma = value.IndexOf(',');
+            var value  = line["#EXTINF:".Length..];
+            var comma  = value.IndexOf(',');
             var number = (comma < 0 ? value : value[..comma]).Trim();
 
             if (double.TryParse(number,
@@ -411,19 +441,25 @@ public partial class M3U8PlaylistExtractor : IExtractor
     }
 
     private async Task<double?> TryGetVariantDurationAsync(string variantUrl,
-        IDictionary<string, string>?                                     headers,
-        CancellationToken                                                cancellationToken)
+        IDictionary<string, string>?                              headers,
+        CancellationToken                                         cancellationToken,
+        HttpClient?                                               client = null)
     {
         try
         {
+            var       http    = client ?? _httpClient;
             using var request = new HttpRequestMessage(HttpMethod.Get, variantUrl);
-            request.Headers.TryAddWithoutValidation("User-Agent",
-                                                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:151.0) Gecko/20100101 Firefox/151.0");
-            request.Headers.Add("Accept", "*/*");
+            if (client is null)
+            {
+                request.Headers.TryAddWithoutValidation("User-Agent",
+                                                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:151.0) Gecko/20100101 Firefox/151.0");
+                request.Headers.Add("Accept", "*/*");
+            }
+
             request.AddHeaders(headers);
 
             using var response =
-                await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+                await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
             if (!response.IsSuccessStatusCode)
             {
                 return null;
@@ -435,7 +471,7 @@ public partial class M3U8PlaylistExtractor : IExtractor
             }
 
             await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
-            using var reader       = new StreamReader(stream, Encoding.UTF8, false, 8192, true);
+            using var       reader = new StreamReader(stream, Encoding.UTF8, false, 8192, true);
 
             var content = new StringBuilder();
             var buffer  = new char[8192];
@@ -467,24 +503,22 @@ public partial class M3U8PlaylistExtractor : IExtractor
     }
 
     private static Dictionary<string, string>? MergeSourceHeaders(
-        Dictionary<string, string>?                  sourceHeaders,
-        IDictionary<string, string>?                 requestHeaders)
+        Dictionary<string, string>?  sourceHeaders,
+        IDictionary<string, string>? requestHeaders)
     {
         if (requestHeaders is not { Count: > 0 })
         {
             return sourceHeaders;
         }
 
-        // Her kaynak kendi sözlüğünü alır; çağıranın ya da diğer kaynakların
-        // başlıklarının sonradan değiştirilmesi bu kaynağı etkilemez.
         var merged = sourceHeaders is { Count: > 0 }
                          ? new Dictionary<string, string>(sourceHeaders, StringComparer.OrdinalIgnoreCase)
                          : new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var (key, value) in requestHeaders)
         {
-            var name  = SanitizeHeaderValue(key);
-            var val   = SanitizeHeaderValue(value);
+            var name = SanitizeHeaderValue(key);
+            var val  = SanitizeHeaderValue(value);
             if (name is null || val is null)
             {
                 continue;
@@ -517,17 +551,23 @@ public partial class M3U8PlaylistExtractor : IExtractor
 
     private async Task<string?> TryDetectQualityFromTsSegmentAsync(string segmentUrl,
         IDictionary<string, string>?                                      headers,
-        CancellationToken                                                 cancellationToken = default)
+        CancellationToken                                                 cancellationToken = default,
+        HttpClient?                                                       client            = null)
     {
         try
         {
-            using var req = new HttpRequestMessage(HttpMethod.Get, segmentUrl);
+            var       http = client ?? _httpClient;
+            using var req  = new HttpRequestMessage(HttpMethod.Get, segmentUrl);
             req.Headers.TryAddWithoutValidation("Range", "bytes=0-65535");
-            req.Headers.TryAddWithoutValidation("User-Agent",
-                                                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
+            if (client is null)
+            {
+                req.Headers.TryAddWithoutValidation("User-Agent",
+                                                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
+            }
+
             req.AddHeaders(headers);
 
-            using var resp = await _httpClient.SendAsync(req, cancellationToken);
+            using var resp = await http.SendAsync(req, cancellationToken);
             if (resp.IsSuccessStatusCode || resp.StatusCode == HttpStatusCode.PartialContent)
             {
                 var bytes  = await resp.Content.ReadAsByteArrayAsync(cancellationToken);

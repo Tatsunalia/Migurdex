@@ -39,70 +39,87 @@ public class RustHttpMessageHandler : HttpMessageHandler
             return;
         }
 
+        HttpResponseMessage? httpResponse = null;
+        RustNativeStream? ownedStream = null;
         try
         {
             if (response.ErrorPtr != null && response.ErrorLen > 0)
             {
                 var err = Encoding.UTF8.GetString(
                     new ReadOnlySpan<byte>(response.ErrorPtr, (int) response.ErrorLen));
-                tcs.SetException(new HttpRequestException($"Rust side error: {err}"));
                 RustBridge.FreeBuffer(response.ErrorPtr, response.ErrorLen);
+                tcs.TrySetException(new HttpRequestException($"Rust side error: {err}"));
 
                 return;
             }
 
-            var httpResponse = new HttpResponseMessage((HttpStatusCode) response.Status);
-
             if (response.BodyPtr != null && response.BodyLen > 0)
             {
-                var stream =
-                    new RustNativeStream(response.BodyPtr, response.BodyLen, &RustBridge.FreeBufferUnmanaged);
+                try
+                {
+                    ownedStream = new RustNativeStream(response.BodyPtr, response.BodyLen, &RustBridge.FreeBufferUnmanaged);
+                }
+                catch
+                {
+                    RustBridge.FreeBuffer(response.BodyPtr, response.BodyLen);
+                    throw;
+                }
+            }
 
-                httpResponse.Content = new StreamContent(stream);
+            List<(string Key, string Value)>? parsedHeaders = null;
+            if (response.Headers != null && response.HeadersLen > 0)
+            {
+                try
+                {
+                    parsedHeaders = [];
+                    var headersSpan = new ReadOnlySpan<FfiHeader>(response.Headers, (int) response.HeadersLen);
+                    for (var i = 0; i < headersSpan.Length; i++)
+                    {
+                        var h = headersSpan[i];
+                        parsedHeaders.Add((
+                            Encoding.UTF8.GetString(new ReadOnlySpan<byte>(h.KeyPtr, (int) h.KeyLen)),
+                            Encoding.UTF8.GetString(new ReadOnlySpan<byte>(h.ValuePtr, (int) h.ValueLen))));
+                    }
+                }
+                finally
+                {
+                    RustBridge.FreeHeaders(response.Headers, response.HeadersLen);
+                }
+            }
+
+            httpResponse = new HttpResponseMessage((HttpStatusCode) response.Status);
+            if (ownedStream is not null)
+            {
+                httpResponse.Content = new StreamContent(ownedStream);
+                ownedStream = null;
             }
             else
             {
                 httpResponse.Content = new EmptyContent();
             }
 
-            if (response.Headers != null && response.HeadersLen > 0)
+            if (parsedHeaders is not null)
             {
-                var headersSpan = new ReadOnlySpan<FfiHeader>(response.Headers, (int) response.HeadersLen);
-                for (var i = 0; i < headersSpan.Length; i++)
+                foreach (var (key, val) in parsedHeaders)
                 {
-                    var h   = headersSpan[i];
-                    var key = Encoding.UTF8.GetString(new ReadOnlySpan<byte>(h.KeyPtr, (int) h.KeyLen));
-                    var val = Encoding.UTF8.GetString(new ReadOnlySpan<byte>(h.ValuePtr, (int) h.ValueLen));
-
                     if (!httpResponse.Headers.TryAddWithoutValidation(key, val))
                     {
                         httpResponse.Content.Headers.TryAddWithoutValidation(key, val);
                     }
                 }
-
-                RustBridge.FreeHeaders(response.Headers, response.HeadersLen);
             }
 
-            tcs.SetResult(httpResponse);
+            if (!tcs.TrySetResult(httpResponse))
+            {
+                httpResponse.Dispose();
+            }
+            httpResponse = null;
         }
         catch (Exception ex)
         {
-            if (response.ErrorPtr != null && response.ErrorLen > 0)
-            {
-                RustBridge.FreeBuffer(response.ErrorPtr, response.ErrorLen);
-            }
-
-            if (response.Headers != null && response.HeadersLen > 0)
-            {
-                RustBridge.FreeHeaders(response.Headers, response.HeadersLen);
-            }
-
-            if (response.BodyPtr != null && response.BodyLen > 0)
-            {
-                RustBridge.FreeBuffer(response.BodyPtr, response.BodyLen);
-            }
-
-            tcs.SetException(ex);
+            httpResponse?.Dispose();
+            ownedStream?.Dispose();
+            tcs.TrySetException(ex);
         }
     }
 
@@ -151,6 +168,12 @@ public class RustHttpMessageHandler : HttpMessageHandler
             skipCertVerify = legacyScv;
         }
 
+        var noDefaultHeaders = false;
+        if (request.Options.TryGetValue(RustHttpOptions.NoDefaultHeadersKey, out var ndhValue))
+        {
+            noDefaultHeaders = ndhValue;
+        }
+
         string? emulation = null;
         if (request.Options.TryGetValue(RustHttpOptions.EmulationKey, out var emuValue))
         {
@@ -171,7 +194,8 @@ public class RustHttpMessageHandler : HttpMessageHandler
             fixed (byte* emuPtr = emuBytes)
             {
                 var ffiHeaders = new FfiHeader[requestHeaders.Count];
-                var handles    = new GCHandle[requestHeaders.Count * 2];
+                var pinCache = new Dictionary<byte[], GCHandle>(ReferenceEqualityComparer.Instance);
+                var handles = new List<GCHandle>(requestHeaders.Count * 2);
 
                 try
                 {
@@ -180,11 +204,19 @@ public class RustHttpMessageHandler : HttpMessageHandler
                         var hKey = requestHeaders[i].Key;
                         var hVal = requestHeaders[i].Val;
 
-                        var pinKey = GCHandle.Alloc(hKey, GCHandleType.Pinned);
-                        var pinVal = GCHandle.Alloc(hVal, GCHandleType.Pinned);
+                        if (!pinCache.TryGetValue(hKey, out var pinKey))
+                        {
+                            pinKey = GCHandle.Alloc(hKey, GCHandleType.Pinned);
+                            pinCache[hKey] = pinKey;
+                            handles.Add(pinKey);
+                        }
 
-                        handles[i * 2]       = pinKey;
-                        handles[(i * 2) + 1] = pinVal;
+                        if (!pinCache.TryGetValue(hVal, out var pinVal))
+                        {
+                            pinVal = GCHandle.Alloc(hVal, GCHandleType.Pinned);
+                            pinCache[hVal] = pinVal;
+                            handles.Add(pinVal);
+                        }
 
                         ffiHeaders[i] = new FfiHeader
                         {
@@ -199,10 +231,11 @@ public class RustHttpMessageHandler : HttpMessageHandler
                     {
                         new()
                         {
-                            NoFollow       = noFollow,
-                            SkipCertVerify = skipCertVerify,
-                            EmulationPtr   = emuBytes.Length > 0 ? emuPtr : (byte*) 0,
-                            EmulationLen   = (nuint) emuBytes.Length
+                            NoFollow         = noFollow,
+                            SkipCertVerify   = skipCertVerify,
+                            NoDefaultHeaders = noDefaultHeaders,
+                            EmulationPtr     = emuBytes.Length > 0 ? emuPtr : (byte*) 0,
+                            EmulationLen     = (nuint) emuBytes.Length
                         }
                     };
 
@@ -215,7 +248,7 @@ public class RustHttpMessageHandler : HttpMessageHandler
                             (nuint) urlBytes.Length,
                             methodPtr,
                             (nuint) methodBytes.Length,
-                            ffiHeadersPtr,
+                            ffiHeaders.Length > 0 ? ffiHeadersPtr : (FfiHeader*) 0,
                             (nuint) ffiHeaders.Length,
                             bodyBytes.Length > 0 ? bodyPtr : (byte*) 0,
                             (nuint) bodyBytes.Length,

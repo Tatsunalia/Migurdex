@@ -16,10 +16,10 @@ public partial class DoodStreamExtractor : IExtractor
         _httpClient = bridge.CreateHttpClient(o =>
         {
             o.AllowAutoRedirect = true;
-            o.Emulation         = BrowserEmulation.Chrome120;
+            o.Emulation         = BrowserEmulation.Chrome147;
         });
 
-        _logger         = bridge.CreateLogger<DoodStreamExtractor>();
+        _logger = bridge.CreateLogger<DoodStreamExtractor>();
     }
 
     public string Name => "DoodStream";
@@ -52,23 +52,11 @@ public partial class DoodStreamExtractor : IExtractor
                 url = url.Replace("/f/", "/e/");
             }
 
-            var requestHeaders = new Dictionary<string, string>
-            {
-                {
-                    "User-Agent",
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-                }
-            };
-
             var targetUrl = url;
 
             _logger.LogDebug("fetching DoodStream embed page: {Url}", url);
 
             var request = new HttpRequestMessage(HttpMethod.Get, targetUrl);
-            foreach (var kv in requestHeaders)
-            {
-                request.Headers.TryAddWithoutValidation(kv.Key, kv.Value);
-            }
 
             var response = await _httpClient.SendAsync(request, cancellationToken);
 
@@ -99,15 +87,17 @@ public partial class DoodStreamExtractor : IExtractor
             var passMd5Path = passMd5Match.Groups[1].Value;
             var token       = passMd5Path.Split('/').Last();
 
-            var uri        = new Uri(targetUrl);
-            var baseDomain = $"{uri.Scheme}://{uri.Host}";
+            var finalUri   = response.RequestMessage?.RequestUri is { Host.Length: > 0 } r ? r : new Uri(targetUrl);
+            var baseDomain = $"{finalUri.Scheme}://{finalUri.Host}";
             var passMd5Url = $"{baseDomain}/pass_md5/{passMd5Path}";
 
             _logger.LogDebug("fetching stream base from: {PassMd5Url}", passMd5Url);
 
             var passRequest = new HttpRequestMessage(HttpMethod.Get, passMd5Url);
-            passRequest.Headers.TryAddWithoutValidation("User-Agent", requestHeaders["User-Agent"]);
-            passRequest.Headers.Add("Referer", url);
+            passRequest.Headers.TryAddWithoutValidation("Accept-Language", "en-US,en;q=0.9");
+            passRequest.Headers.TryAddWithoutValidation("Accept", "*/*");
+            passRequest.Headers.TryAddWithoutValidation("X-Requested-With", "XMLHttpRequest");
+            passRequest.Headers.Add("Referer", finalUri.ToString());
 
             var passResponse = await _httpClient.SendAsync(passRequest, cancellationToken);
             if (!passResponse.IsSuccessStatusCode)
@@ -134,8 +124,8 @@ public partial class DoodStreamExtractor : IExtractor
             _logger.LogInformation("successfully extracted direct video URL");
             sources.Add(new VideoSource
             {
-                Url     = finalVideoUrl,
-                Type    = VideoType.Mp4,
+                Url  = finalVideoUrl,
+                Type = VideoType.Mp4,
                 Headers = new Dictionary<string, string>
                 {
                     { "Referer", baseDomain }

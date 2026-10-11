@@ -12,5 +12,12 @@ public interface IExtractorManager
         IDictionary<string, string>?            headers           = null,
         CancellationToken                       cancellationToken = default);
 
+    Task<ExtractionOutcome> ExtractDetailedAsync(string url,
+        IDictionary<string, string>?            headers           = null,
+        CancellationToken                       cancellationToken = default);
+
+    Task EnrichSourcesAsync(List<VideoSource> sources,
+        CancellationToken                       cancellationToken = default);
+
     bool CanExtract(string url);
 }

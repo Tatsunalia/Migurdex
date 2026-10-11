@@ -39,13 +39,4 @@ jobs:
             -   name: Run extractor smoke tests
                 run: |
                     dotnet test Migurdex.Tests/Migurdex.Tests.csproj \
-                      -c Debug \
-                      --logger "trx;LogFileName=smoke.trx" \
-                      --results-directory TestResults
-
-            -   name: Upload TRX report
-                if: always()
-                uses: actions/upload-artifact@v7
-                with:
-                    name: smoke-trx
-                    path: TestResults/smoke.trx
+                      -c Debug
