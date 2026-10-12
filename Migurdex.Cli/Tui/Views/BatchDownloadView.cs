@@ -110,13 +110,21 @@ public class BatchDownloadView : BaseView
         }
 
         var options = DownloadQueueOptions.FromConfig(config);
+        var existingIndices = DownloadPresence.FindExistingEpisodeIndices(
+            new DownloadPathBuilder(), config.DownloadDirectory, animeTitle, ordered);
+        var labels = BatchDownloadPlan.BuildLabels(ordered);
+        foreach (var index in existingIndices)
+        {
+            labels[index] = $"✓ (zaten indirilmiş) {labels[index]}";
+        }
+
         var seasonLine = _season.HasValue
                              ? $"  [grey]•[/]  [grey]Sezon:[/] {_season.Value}"
                              : string.Empty;
 
         var selected = EpisodeMultiSelectPrompt.Show(
             $"Toplu indirme • {animeTitle}",
-            BatchDownloadPlan.BuildLabels(ordered),
+            labels,
             headerLines:
             [
                 $"[grey]Hedef:[/] {Markup.Escape(config.DownloadDirectory)}{seasonLine}",
@@ -132,11 +140,26 @@ public class BatchDownloadView : BaseView
 
         _lastSelection = selected;
 
-        var chosen = BatchDownloadPlan.FromSelection(ordered, selected);
+        var selectedEpisodes = BatchDownloadPlan.FromSelection(ordered, selected);
+        var skippedCount = config.DownloadOverwrite
+                               ? 0
+                               : selected.Count(existingIndices.Contains);
+        var chosen = config.DownloadOverwrite
+                         ? selectedEpisodes
+                         : BatchDownloadPlan.FromSelection(ordered,
+                                                           selected.Where(index => !existingIndices.Contains(index)).ToArray());
+
+        if (chosen.Count == 0)
+        {
+            Toast.Show($"Seçilen {skippedCount} bölüm zaten indirilmiş; üzerine yazma kapalı.");
+            navigator.Pop();
+            return;
+        }
 
         AnsiConsole.Clear();
         Theme.WriteHeader("Toplu indirme", animeTitle);
-        AnsiConsole.MarkupLine($"[grey]Bölüm:[/] {chosen.Count} / {ordered.Count}"
+        AnsiConsole.MarkupLine($"[grey]Bölüm:[/] {selectedEpisodes.Count} / {ordered.Count}"
+                               + (skippedCount > 0 ? $"  [grey]•[/]  [yellow]Atlandı:[/] {skippedCount} zaten indirilmiş" : string.Empty)
                                + (_season.HasValue ? $"  [grey]•[/]  [grey]Sezon:[/] {_season.Value}" : string.Empty));
         AnsiConsole.MarkupLine($"[grey]Hedef:[/] {Markup.Escape(config.DownloadDirectory)}");
         AnsiConsole.MarkupLine(
@@ -186,7 +209,7 @@ public class BatchDownloadView : BaseView
 
         var summary = await RunQueueAsync(items, options, trackers, states, paths);
 
-        ShowSummary(summary, chosen, config.DownloadDirectory);
+        ShowSummary(summary, chosen, config.DownloadDirectory, skippedCount);
         navigator.Pop();
     }
 
@@ -435,7 +458,8 @@ public class BatchDownloadView : BaseView
     private static void ShowSummary(
         DownloadQueueSummary summary,
         List<Episode>        chosen,
-        string               outputDirectory)
+        string               outputDirectory,
+        int                  skippedCount)
     {
         var headerLines = new List<string>
         {
@@ -443,6 +467,10 @@ public class BatchDownloadView : BaseView
             $"[grey]Bölüm:[/] {summary.Total}  [grey]•[/]  [green]tamam: {summary.Succeeded}[/]  "
             + $"[grey]•[/]  [red]hata: {summary.Failed}[/]  [grey]•[/]  [yellow]iptal: {summary.Cancelled}[/]"
         };
+        if (skippedCount > 0)
+        {
+            headerLines.Add($"[yellow]Atlandı:[/] {skippedCount} bölüm zaten indirilmişti.");
+        }
 
         var choices = BatchDownloadPlan.BuildSummaryRows(summary, chosen)
                                        .Select(row => new FuzzyChoice
