@@ -306,11 +306,33 @@ public partial class TrAnimeIzleProvider : IAnimeProvider
         CancellationToken                                            cancellationToken = default)
     {
         var sources = new List<VideoSource>();
+        var upstreamFailures = new List<UpstreamResponseException>();
 
         try
         {
             var watchUrl = $"{BaseUrl}/{episodeId}-izle";
-            var html = await _httpClient.GetStringAsync(watchUrl, cancellationToken);
+            using var watchResponse = await _httpClient.GetAsync(watchUrl, cancellationToken);
+            var html = await watchResponse.Content.ReadAsStringAsync(cancellationToken);
+            if (!watchResponse.IsSuccessStatusCode)
+            {
+                throw CreateResponseFailure(
+                    "watch page",
+                    html,
+                    watchResponse.Content.Headers.ContentType?.MediaType,
+                    (int)watchResponse.StatusCode,
+                    watchUrl);
+            }
+
+            ThrowIfCaptchaHtml(html, "watch page", watchResponse.Content.Headers.ContentType?.MediaType);
+            if (!IsHtmlResponse(html, watchResponse.Content.Headers.ContentType?.MediaType))
+            {
+                throw CreateUnexpectedPayloadFailure(
+                    "watch page",
+                    html,
+                    watchResponse.Content.Headers.ContentType?.MediaType,
+                    watchUrl);
+            }
+
             var parser = new HtmlParser();
             var document = await parser.ParseDocumentAsync(html);
             var translators = document.QuerySelectorAll("a[data-translatorclick][data-fansub-name]");
@@ -336,16 +358,43 @@ public partial class TrAnimeIzleProvider : IAnimeProvider
                 try
                 {
                     using var translatorResponse = await _httpClient.GetAsync(translatorUrl, cancellationToken);
+                    var translatorBody = await translatorResponse.Content.ReadAsStringAsync(cancellationToken);
                     if (!translatorResponse.IsSuccessStatusCode)
                     {
-                        _logger.LogDebug("translator endpoint returned {StatusCode}: {Url}",
-                                         (int) translatorResponse.StatusCode,
-                                         translatorUrl);
+                        upstreamFailures.Add(CreateResponseFailure(
+                            "translator",
+                            translatorBody,
+                            translatorResponse.Content.Headers.ContentType?.MediaType,
+                            (int)translatorResponse.StatusCode,
+                            translatorUrl));
                         continue;
                     }
 
-                    using var translatorJson = JsonDocument.Parse(
-                        await translatorResponse.Content.ReadAsStringAsync(cancellationToken));
+                    if (IsHtmlResponse(translatorBody, translatorResponse.Content.Headers.ContentType?.MediaType))
+                    {
+                        upstreamFailures.Add(CreateResponseFailure(
+                            "translator",
+                            translatorBody,
+                            translatorResponse.Content.Headers.ContentType?.MediaType,
+                            null,
+                            translatorUrl));
+                        continue;
+                    }
+
+                    JsonDocument translatorJson;
+                    try
+                    {
+                        translatorJson = JsonDocument.Parse(translatorBody);
+                    }
+                    catch (JsonException ex)
+                    {
+                        upstreamFailures.Add(new UpstreamResponseException(
+                            $"TrAnimeIzle translator returned invalid JSON: {translatorUrl}.", ex));
+                        continue;
+                    }
+
+                    using (translatorJson)
+                    {
                     if (!translatorJson.RootElement.TryGetProperty("data", out var data)
                         || data.ValueKind != JsonValueKind.String)
                     {
@@ -366,13 +415,28 @@ public partial class TrAnimeIzleProvider : IAnimeProvider
                         {
                             var videoResponse = await SendPlayerRequestAsync(
                                 () => new HttpRequestMessage(HttpMethod.Get, videoUrl),
+                                "video",
+                                upstreamFailures,
                                 cancellationToken);
                             if (videoResponse is null)
                             {
                                 continue;
                             }
 
-                            using var videoJson = JsonDocument.Parse(videoResponse.Value.Content);
+                            JsonDocument videoJson;
+                            try
+                            {
+                                videoJson = JsonDocument.Parse(videoResponse.Value.Content);
+                            }
+                            catch (JsonException ex)
+                            {
+                                upstreamFailures.Add(new UpstreamResponseException(
+                                    $"TrAnimeIzle video endpoint returned invalid JSON: {videoUrl}.", ex));
+                                continue;
+                            }
+
+                            using (videoJson)
+                            {
                             if (!videoJson.RootElement.TryGetProperty("player", out var playerProp)
                                 || playerProp.ValueKind != JsonValueKind.String)
                             {
@@ -399,7 +463,7 @@ public partial class TrAnimeIzleProvider : IAnimeProvider
                                         "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8");
                                     request.Options.Set(new HttpRequestOptionsKey<bool>("NoFollow"), true);
                                     return request;
-                                }, cancellationToken);
+                                }, "player", upstreamFailures, cancellationToken);
                                 if (playerResponse is null)
                                 {
                                     continue;
@@ -431,12 +495,19 @@ public partial class TrAnimeIzleProvider : IAnimeProvider
                                     Group = groupName
                                 });
                             }
+                            }
                         }
                         catch (Exception ex) when (ex is not OperationCanceledException)
                         {
                             _logger.LogDebug(ex, "failed to resolve video source URL: {Url}", videoUrl);
                         }
                     }
+                    }
+                }
+                catch (UpstreamResponseException ex)
+                {
+                    upstreamFailures.Add(ex);
+                    _logger.LogWarning(ex, "translator response rejected: {Url}", translatorUrl);
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
@@ -448,18 +519,41 @@ public partial class TrAnimeIzleProvider : IAnimeProvider
         {
             throw;
         }
+        catch (UpstreamResponseException)
+        {
+            throw;
+        }
         catch (Exception ex)
         {
             _logger.LogError(ex, "getVideoSourcesAsync failed for: {EpisodeId}", episodeId);
         }
 
-        return sources.GroupBy(source => source.Url, StringComparer.OrdinalIgnoreCase)
-                      .Select(grouping => grouping.First())
-                      .ToList();
+        var distinctSources = sources.GroupBy(source => source.Url, StringComparer.OrdinalIgnoreCase)
+                                     .Select(grouping => grouping.First())
+                                     .ToList();
+        if (distinctSources.Count == 0 && upstreamFailures.Count > 0)
+        {
+            throw new UpstreamResponseException(
+                $"TrAnimeIzle could not resolve a source for episode {episodeId}. Upstream failures: "
+                + string.Join(" | ", upstreamFailures.Select(failure => failure.Message).Distinct(StringComparer.Ordinal)));
+        }
+
+        if (distinctSources.Count > 0 && upstreamFailures.Count > 0)
+        {
+            _logger.LogWarning(
+                "resolved {ResolvedCount} sources for {EpisodeId} with {FailureCount} upstream response failures",
+                distinctSources.Count,
+                episodeId,
+                upstreamFailures.Count);
+        }
+
+        return distinctSources;
     }
 
     private async Task<(string Content, Uri? Location)?> SendPlayerRequestAsync(
         Func<HttpRequestMessage> createRequest,
+        string stage,
+        List<UpstreamResponseException> upstreamFailures,
         CancellationToken cancellationToken)
     {
         for (var attempt = 1; attempt <= MaxPlayerRequestAttempts; attempt++)
@@ -477,12 +571,49 @@ public partial class TrAnimeIzleProvider : IAnimeProvider
                 }
                 else if (!response.IsSuccessStatusCode)
                 {
-                    _logger.LogDebug("player request failed with HTTP {StatusCode}", (int)response.StatusCode);
+                    var body = await response.Content.ReadAsStringAsync(cancellationToken);
+                    upstreamFailures.Add(CreateResponseFailure(
+                        stage,
+                        body,
+                        response.Content.Headers.ContentType?.MediaType,
+                        (int)response.StatusCode,
+                        request.RequestUri?.ToString() ?? "unknown URL"));
                     return null;
                 }
                 else
                 {
-                    return (await response.Content.ReadAsStringAsync(cancellationToken),
+                    var body = await response.Content.ReadAsStringAsync(cancellationToken);
+                    var mediaType = response.Content.Headers.ContentType?.MediaType;
+                    if (IsHtmlResponse(body, mediaType) && ContainsCaptchaMarker(body))
+                    {
+                        upstreamFailures.Add(new UpstreamResponseException(
+                            $"TrAnimeIzle {stage} endpoint returned CAPTCHA/challenge HTML: {request.RequestUri}."));
+                        return null;
+                    }
+
+                    if (!stage.Equals("player", StringComparison.OrdinalIgnoreCase)
+                        && IsHtmlResponse(body, mediaType))
+                    {
+                        upstreamFailures.Add(CreateResponseFailure(
+                            stage, body, mediaType, null, request.RequestUri?.ToString() ?? "unknown URL"));
+                        return null;
+                    }
+
+                    if (stage.Equals("player", StringComparison.OrdinalIgnoreCase) && IsJsonLike(body, mediaType))
+                    {
+                        try
+                        {
+                            using var _ = JsonDocument.Parse(body);
+                        }
+                        catch (JsonException ex)
+                        {
+                            upstreamFailures.Add(new UpstreamResponseException(
+                                $"TrAnimeIzle player endpoint returned invalid JSON: {request.RequestUri}.", ex));
+                            return null;
+                        }
+                    }
+
+                    return (body,
                             response.Headers.Location);
                 }
             }
@@ -502,6 +633,92 @@ public partial class TrAnimeIzleProvider : IAnimeProvider
         var code = (int)statusCode;
         return statusCode == HttpStatusCode.TooManyRequests || code is >= 500 and <= 599;
     }
+
+    private static UpstreamResponseException CreateResponseFailure(
+        string stage,
+        string body,
+        string? mediaType,
+        int? statusCode,
+        string url)
+    {
+        var status = statusCode is null ? "" : $" with HTTP {statusCode.Value}";
+        if (IsHtmlResponse(body, mediaType))
+        {
+            var kind = ContainsCaptchaMarker(body) ? "CAPTCHA/challenge HTML" : "HTML";
+            return new UpstreamResponseException(
+                $"TrAnimeIzle {stage} endpoint returned {kind}{status}: {url}.");
+        }
+
+        var responseDescription = statusCode is null
+                                      ? "returned an unexpected response"
+                                      : $"returned HTTP {statusCode.Value}";
+        return new UpstreamResponseException($"TrAnimeIzle {stage} endpoint {responseDescription}: {url}.");
+    }
+
+    private static UpstreamResponseException CreateUnexpectedPayloadFailure(
+        string stage,
+        string body,
+        string? mediaType,
+        string url)
+    {
+        if (IsJsonLike(body, mediaType))
+        {
+            try
+            {
+                using var _ = JsonDocument.Parse(body);
+            }
+            catch (JsonException ex)
+            {
+                return new UpstreamResponseException(
+                    $"TrAnimeIzle {stage} endpoint returned invalid JSON: {url}.", ex);
+            }
+        }
+
+        return new UpstreamResponseException(
+            $"TrAnimeIzle {stage} endpoint returned an unexpected non-HTML response: {url}.");
+    }
+
+    private static void ThrowIfCaptchaHtml(string body, string stage, string? mediaType)
+    {
+        if (IsHtmlResponse(body, mediaType) && ContainsCaptchaMarker(body))
+        {
+            throw new UpstreamResponseException($"TrAnimeIzle {stage} returned CAPTCHA/challenge HTML.");
+        }
+    }
+
+    private static bool IsHtmlResponse(string body, string? mediaType)
+    {
+        if (mediaType?.Equals("text/html", StringComparison.OrdinalIgnoreCase) == true
+            || mediaType?.Equals("application/xhtml+xml", StringComparison.OrdinalIgnoreCase) == true)
+        {
+            return true;
+        }
+
+        var trimmed = body.AsSpan().TrimStart();
+        return trimmed.StartsWith("<!doctype html", StringComparison.OrdinalIgnoreCase)
+               || trimmed.StartsWith("<html", StringComparison.OrdinalIgnoreCase)
+               || trimmed.StartsWith("<head", StringComparison.OrdinalIgnoreCase)
+               || trimmed.StartsWith("<body", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsJsonLike(string body, string? mediaType)
+    {
+        var trimmed = body.AsSpan().TrimStart();
+        return mediaType?.Contains("json", StringComparison.OrdinalIgnoreCase) == true
+               || trimmed.StartsWith("{".AsSpan(), StringComparison.Ordinal)
+               || trimmed.StartsWith("[".AsSpan(), StringComparison.Ordinal);
+    }
+
+    private static bool ContainsCaptchaMarker(string body)
+    {
+        var preview = body[..Math.Min(body.Length, 2048)];
+        return preview.Contains("captcha", StringComparison.OrdinalIgnoreCase)
+               || preview.Contains("challenge", StringComparison.OrdinalIgnoreCase)
+               || preview.Contains("doğrulama", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private sealed class UpstreamResponseException(string message, Exception? innerException = null)
+        : InvalidOperationException(message, innerException);
 
     private string NormalizeUrl(string url)
     {
