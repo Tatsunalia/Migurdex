@@ -33,6 +33,10 @@ public interface IApiClientService
 {
     Task<bool>                                   IsApiOnlineAsync(CancellationToken       cancellationToken = default);
     Task<bool>                                   TryStartApiDaemonAsync(CancellationToken cancellationToken = default);
+    Task<ApiHealthInfo?> GetApiHealthAsync(CancellationToken cancellationToken = default)
+    {
+        return Task.FromResult<ApiHealthInfo?>(null);
+    }
     Task<ApiResult<IReadOnlyList<ProviderInfo>>> GetProvidersAsync(CancellationToken      cancellationToken = default);
 
     Task<ApiResult<IReadOnlyList<SearchResult>>> SearchAnimeAsync(string query,
@@ -90,6 +94,12 @@ public interface IApiClientService
         CancellationToken                     cancellationToken = default);
 
     Task<ApiResult<BlameReport?>> GetBlameReportAsync(CancellationToken cancellationToken = default);
+}
+
+/// <summary>GET /health gövdesinden sürüm karşılaştırması için gereken alan.</summary>
+public sealed class ApiHealthInfo
+{
+    public string Version { get; set; } = string.Empty;
 }
 
 public class ProviderInfo

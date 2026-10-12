@@ -65,7 +65,7 @@ public static class NonInteractiveCommand
         }
 
         var api = services.GetRequiredService<IApiClientService>();
-        if (!await EnsureApiOnlineAsync(api))
+        if (!await EnsureApiOnlineAsync(api, services))
         {
             return 1;
         }
@@ -124,7 +124,7 @@ public static class NonInteractiveCommand
 
         var api     = services.GetRequiredService<IApiClientService>();
         var history = services.GetRequiredService<IHistoryService>();
-        if (!await EnsureApiOnlineAsync(api))
+        if (!await EnsureApiOnlineAsync(api, services))
         {
             return 1;
         }
@@ -197,7 +197,7 @@ public static class NonInteractiveCommand
 
         var api     = services.GetRequiredService<IApiClientService>();
         var history = services.GetRequiredService<IHistoryService>();
-        if (!await EnsureApiOnlineAsync(api))
+        if (!await EnsureApiOnlineAsync(api, services))
         {
             return 1;
         }
@@ -433,7 +433,7 @@ public static class NonInteractiveCommand
         }
 
         var api = services.GetRequiredService<IApiClientService>();
-        if (!await EnsureApiOnlineAsync(api))
+        if (!await EnsureApiOnlineAsync(api, services))
         {
             return 1;
         }
@@ -511,10 +511,12 @@ public static class NonInteractiveCommand
         return 0;
     }
 
-    private static async Task<bool> EnsureApiOnlineAsync(IApiClientService api)
+    private static async Task<bool> EnsureApiOnlineAsync(IApiClientService api, IServiceProvider services)
     {
         if (await api.IsApiOnlineAsync())
         {
+            var apiBaseUrl = services.GetRequiredService<IConfigurationService>().Config.ApiBaseUrl;
+            await ApiVersionCheck.ReportAsync(api, apiBaseUrl);
             return true;
         }
 

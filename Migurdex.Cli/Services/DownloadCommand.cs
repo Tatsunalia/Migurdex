@@ -263,7 +263,7 @@ public static class DownloadCommand
     {
         var config = services.GetRequiredService<IConfigurationService>().Config;
         var api    = services.GetRequiredService<IApiClientService>();
-        if (!await EnsureApiOnlineAsync(api, cancellationToken))
+        if (!await EnsureApiOnlineAsync(api, config.ApiBaseUrl, cancellationToken))
         {
             return await FailAsync(options, "API bağlantısı kurulamadı. Ayarlardaki API adresini kontrol edin.");
         }
@@ -827,10 +827,13 @@ public static class DownloadCommand
         Console.WriteLine("  Çıkış kodları: 0 başarı, 1 çalışma hatası, 2 kullanım hatası, 3 altyazı iptali.");
     }
 
-    private static async Task<bool> EnsureApiOnlineAsync(IApiClientService api, CancellationToken cancellationToken)
+    private static async Task<bool> EnsureApiOnlineAsync(IApiClientService api,
+        string?                                                           apiBaseUrl,
+        CancellationToken                                                 cancellationToken)
     {
         if (await api.IsApiOnlineAsync(cancellationToken))
         {
+            await ApiVersionCheck.ReportAsync(api, apiBaseUrl, cancellationToken);
             cancellationToken.ThrowIfCancellationRequested();
             return true;
         }

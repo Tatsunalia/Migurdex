@@ -22,6 +22,8 @@ public sealed record UnresolvedSourceEnvelope(string Url, string Code, string Me
 
 public class ApiClientService : IApiClientService
 {
+    private static readonly TimeSpan HealthReadTimeout = TimeSpan.FromMilliseconds(1500);
+
     private static readonly JsonSerializerOptions JsonOpts = new()
     {
         PropertyNameCaseInsensitive = true
@@ -65,6 +67,32 @@ public class ApiClientService : IApiClientService
         catch
         {
             return false;
+        }
+    }
+
+    public async Task<ApiHealthInfo?> GetApiHealthAsync(CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            cts.CancelAfter(HealthReadTimeout);
+            using var response = await _httpClient.GetAsync("health", cts.Token);
+            if (!response.IsSuccessStatusCode)
+            {
+                return null;
+            }
+
+            var body = await response.Content.ReadAsStringAsync(cts.Token);
+            return JsonSerializer.Deserialize<ApiHealthInfo>(body, JsonOpts);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch
+        {
+            // Sürüm okunamıyorsa uyarı atlanır; bu kontrol API işlemini bozmamalı.
+            return null;
         }
     }
 

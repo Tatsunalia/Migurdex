@@ -176,6 +176,12 @@ public static class Program
                     }
                 }
             }
+            else
+            {
+                var apiBaseUrl = serviceProvider.GetRequiredService<IConfigurationService>()
+                                                .Config.ApiBaseUrl;
+                await ApiVersionCheck.ReportAsync(apiService, apiBaseUrl, tuiToken);
+            }
 
             var navigator = serviceProvider.GetRequiredService<ITuiNavigator>();
             activeNavigator = navigator;
