@@ -1,3 +1,5 @@
+using Migurdex.Shared;
+using System.Diagnostics;
 using System.Net;
 using System.Net.Http;
 using System.Security.Cryptography;
@@ -80,21 +82,24 @@ internal static class DownloadHttp
         HttpClient                    client,
         Uri                           initialUri,
         IReadOnlyDictionary<string, string>? headers,
-        CancellationToken             cancellationToken)
+        CancellationToken             cancellationToken,
+        DownloadStallOptions?         stallOptions = null)
     {
         ArgumentNullException.ThrowIfNull(client);
-        ValidateHttpUri(initialUri);
+        await ValidateHttpUriAsync(initialUri, cancellationToken).ConfigureAwait(false);
 
         var currentUri     = initialUri;
         var requestHeaders = CopyHeaders(headers);
+        var options        = stallOptions ?? DownloadStallOptions.Default;
 
         for (var redirectCount = 0;;)
         {
             cancellationToken.ThrowIfCancellationRequested();
             using var request = CreateRequest(currentUri, requestHeaders);
-            var response = await client.SendAsync(request,
-                                                  HttpCompletionOption.ResponseHeadersRead,
-                                                  cancellationToken)
+            var response = await SendForHeadersAsync(client,
+                                                     request,
+                                                     options.ResponseHeaderTimeout,
+                                                     cancellationToken)
                                    .ConfigureAwait(false);
 
             if (!IsRedirect(response.StatusCode))
@@ -118,7 +123,7 @@ internal static class DownloadHttp
             var nextUri = location.IsAbsoluteUri
                               ? location
                               : new Uri(currentUri, location);
-            ValidateHttpUri(nextUri);
+            await ValidateHttpUriAsync(nextUri, cancellationToken).ConfigureAwait(false);
 
             if (!IsSameOrigin(currentUri, nextUri))
             {
@@ -279,6 +284,68 @@ internal static class DownloadHttp
         {
             throw new DownloadException("Yalnız HTTP ve HTTPS kaynakları desteklenir.");
         }
+
+        if (IPAddress.TryParse(uri.Host, out var literal) && NetworkGuard.IsBlockedAddress(literal)
+            || string.Equals(uri.Host, "localhost", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new DownloadException("Bu host'a istek gönderilemez.");
+        }
+    }
+
+    public static async Task ValidateHttpUriAsync(Uri uri, CancellationToken cancellationToken = default)
+    {
+        ValidateHttpUri(uri);
+        if (await NetworkGuard.ResolvesToBlockedAddressAsync(uri.Host, cancellationToken).ConfigureAwait(false))
+        {
+            throw new DownloadException("Bu host'a istek gönderilemez.");
+        }
+    }
+
+    private static async Task<HttpResponseMessage> SendForHeadersAsync(
+        HttpClient client,
+        HttpRequestMessage request,
+        TimeSpan headerTimeout,
+        CancellationToken cancellationToken)
+    {
+        var sendTask = client.SendAsync(request,
+                                        HttpCompletionOption.ResponseHeadersRead,
+                                        cancellationToken);
+        if (headerTimeout == Timeout.InfiniteTimeSpan || sendTask.IsCompleted)
+        {
+            return await sendTask.ConfigureAwait(false);
+        }
+
+        var watchdog = Task.Delay(headerTimeout, cancellationToken);
+        if (await Task.WhenAny(sendTask, watchdog).ConfigureAwait(false) == sendTask)
+        {
+            return await sendTask.ConfigureAwait(false);
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+        DisposeWhenCompleted(sendTask);
+        throw new DownloadException($"Sunucu {Math.Max(1, (int)Math.Round(headerTimeout.TotalSeconds, MidpointRounding.AwayFromZero))} saniye boyunca yanıt vermedi.");
+    }
+
+    private static void DisposeWhenCompleted(Task<HttpResponseMessage> sendTask)
+    {
+        _ = sendTask.ContinueWith(static task =>
+                                  {
+                                      if (task.Status == TaskStatus.RanToCompletion)
+                                      {
+                                          task.Result.Dispose();
+                                          return;
+                                      }
+
+                                      _ = task.Exception;
+                                  },
+                                  CancellationToken.None,
+                                  TaskContinuationOptions.ExecuteSynchronously,
+                                  TaskScheduler.Default);
+    }
+
+    internal static int ToWholeSeconds(TimeSpan value)
+    {
+        return Math.Max(1, (int)Math.Round(value.TotalSeconds, MidpointRounding.AwayFromZero));
     }
 
     private static HttpRequestMessage CreateRequest(
@@ -337,5 +404,191 @@ internal static class DownloadHttp
             or HttpStatusCode.SeeOther
             or HttpStatusCode.TemporaryRedirect
             or HttpStatusCode.PermanentRedirect;
+    }
+}
+
+/// <summary>
+/// İndirme akışının asılı kalmasını (stall) yakalamak için kullanılan eşikler.
+///
+/// <para><b>Neden <c>HttpClient.Timeout</c> değil?</b> <c>HttpClient.Timeout</c>
+/// duvar-saati (wall-clock) sınırıdır: istek başlangıcından itibaren geçen süreyi
+/// ölçer. 272 MB'lık bir dosya 1 Mbps bağlantıda ~36 dakika sürer; makul görünen
+/// bir 5 dakikalık sınır sağlıklı indirmeleri keserdi — yani mevcut sızıntı yerine
+/// yeni bir hata üretirdi. Buradaki eşikler ise <em>son bayttan bu yana geçen
+/// süre</em>yi ölçer. Yavaş ama canlı bir indirmede her blok yeniden sayar; yalnız
+/// hiç bayt gelmediği süre hesaba katılır.</para>
+///
+/// <para>Her eşik <c>Timeout.InfiniteTimeSpan</c> ile kapatılabilir; kapatıldığında
+/// davranış bu düzeltmeden önceki hâline döner.</para>
+/// </summary>
+public sealed class DownloadStallOptions
+{
+    public static DownloadStallOptions Default { get; } = new();
+
+    /// <summary>
+    /// DNS + TCP + TLS + ilk bayta kadar süren yanıt başlığı beklemesi. 90 saniye,
+    /// en kötü ama hâlâ sağlıklı bir kurulumun (DNS yeniden denemeleri, TCP SYN
+    /// yeniden gönderimleri, uzak TLS el sıkışması) 2-3 katıdır. Bu pencere gövde
+    /// eşiklerinden uzun tutulur çünkü sunucu isteği henüz kabul etmemiştir.
+    /// </summary>
+    public TimeSpan ResponseHeaderTimeout { get; init; } = TimeSpan.FromSeconds(90);
+
+    /// <summary>
+    /// Başlıklar geldikten sonra ilk gövde baytı için beklenecek en fazla süre.
+    /// CDN'in origin'den çekmeye başlaması, soğuk önbellek ve sunucu tarafı
+    /// hazırlık bu arada gerçekleşebildiği için boşta bekleme eşiğinden uzun.
+    /// </summary>
+    public TimeSpan FirstByteTimeout { get; init; } = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// İlk bayttan sonra ardışık baytlar arasında beklenecek en fazla süre.
+    /// Kurulmuş bir medya bağlantısında 1 Mbps bile 128 KB'lık bir bloğu ~1 saniyede
+    /// taşır; 20 saniyelik sıfır ilerleme artık "yavaş bağlantı" değil, ölü sokettir.
+    /// </summary>
+    public TimeSpan IdleTimeout { get; init; } = TimeSpan.FromSeconds(20);
+}
+
+/// <summary>
+/// "Son N saniyede <em>hiç bayt gelmedi</em>" koşulunu denetleyen bekçi.
+///
+/// <para>Neden asenkron okuma? Bir ağ akışında <c>ReadAsync</c> ilk bayt gelir
+/// gelmez tamamlanır; tamponu doldurmaya çalışmaz. Bekleme çözünürlüğü bu yüzden
+/// blok boyutundan bağımsızdır ve mevcut 128 KB'lık tamponlar küçültülmeden
+/// kullanılabilir. Senkron <c>Read</c> iptal edilemezdi ve takılan bağlantıda
+/// sonsuza dek bloklardı; hiç kullanılmaz.</para>
+///
+/// <para>Okuma <c>Task.WhenAny(okuma, gözcü)</c> ile yarışır. Gözcü <em>caller</em>
+/// token'ıyla çalışır: iptal edildiğinde bekleyiş <c>OperationCanceledException</c>
+/// ile sonlanır, sonsuza dek süren bir döngü oluşmaz. Zaman aşımında asılı kalan
+/// okuma, çağıranın gövde akışını yok edeceği için önceden iptal edilir.</para>
+///
+/// <para>Ömrü tek bir gövde okuma döngüsüne karşılık gelir. <see cref="Dispose"/>
+/// iç <see cref="CancellationTokenSource"/>'ı yok ettiği için <c>using</c>
+/// bildirimi gövde akışından <em>önce</em> yapılmalıdır (bildirimler ters sırada
+/// yok edilir).</para>
+/// </summary>
+internal sealed class DownloadStallGuard : IDisposable
+{
+    private readonly TimeSpan                _firstByteTimeout;
+    private readonly TimeSpan                _idleTimeout;
+    private readonly CancellationToken       _callerToken;
+    private readonly CancellationTokenSource _readCts;
+    private          long                    _lastActivity;
+
+    public DownloadStallGuard(DownloadStallOptions options, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        if (!IsUsableThreshold(options.FirstByteTimeout))
+        {
+            throw new ArgumentOutOfRangeException(nameof(options),
+                                                "İlk bayt eşiği sıfırdan büyük ya da InfiniteTimeSpan olmalı.");
+        }
+
+        if (!IsUsableThreshold(options.IdleTimeout))
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(options),
+                "Boşta bekleme eşiği sıfırdan büyük ya da InfiniteTimeSpan olmalı.");
+        }
+
+        _firstByteTimeout = options.FirstByteTimeout;
+        _idleTimeout     = options.IdleTimeout;
+        _callerToken     = cancellationToken;
+        _readCts         = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        _lastActivity    = Stopwatch.GetTimestamp();
+    }
+
+    /// <summary>
+    /// Eşik ya pozitif bir süre ya da bekçiyi kapatan
+    /// <see cref="Timeout.InfiniteTimeSpan"/> olmalıdır.
+    /// </summary>
+    private static bool IsUsableThreshold(TimeSpan value)
+    {
+        return value > TimeSpan.Zero || value == Timeout.InfiniteTimeSpan;
+    }
+
+    /// <summary>
+    /// Bu akıştan en az bir bayt okundu mu? İlk bayt eşiği yalnızca bu false
+    /// iken uygulanır.
+    /// </summary>
+    public bool ReceivedAnyByte { get; private set; }
+
+    public async Task<int> ReadAsync(Stream stream, Memory<byte> buffer)
+    {
+        var budget   = ReceivedAnyByte ? _idleTimeout : _firstByteTimeout;
+        var readTask = stream.ReadAsync(buffer, _readCts.Token).AsTask();
+        if (budget == Timeout.InfiniteTimeSpan)
+        {
+            return await CompleteReadAsync(readTask).ConfigureAwait(false);
+        }
+
+        if (readTask.IsCompleted)
+        {
+            return await CompleteReadAsync(readTask).ConfigureAwait(false);
+        }
+
+        var remaining = budget - Stopwatch.GetElapsedTime(_lastActivity);
+        if (remaining <= TimeSpan.Zero)
+        {
+            return ThrowStalled(readTask, budget);
+        }
+
+        var watchdog = Task.Delay(remaining, _callerToken);
+        if (await Task.WhenAny(readTask, watchdog).ConfigureAwait(false) == readTask)
+        {
+            return await CompleteReadAsync(readTask).ConfigureAwait(false);
+        }
+
+        // Gözcü bitti: ya kullanıcı iptal etti ya da eşik doldu. İptal önce gelir;
+        // Ctrl+C bir hata değil, kullanıcının vazgeçmesidir.
+        _callerToken.ThrowIfCancellationRequested();
+        return ThrowStalled(readTask, budget);
+    }
+
+    private async Task<int> CompleteReadAsync(Task<int> readTask)
+    {
+        var read = await readTask.ConfigureAwait(false);
+        if (read > 0)
+        {
+            // Her alınan bayt "son hareket"i tazeler: yavaş ama canlı bir indirme
+            // hiçbir zaman eşiği doldurmaz.
+            ReceivedAnyByte = true;
+            _lastActivity   = Stopwatch.GetTimestamp();
+        }
+
+        return read;
+    }
+
+    private int ThrowStalled(Task<int> readTask, TimeSpan budget)
+    {
+        try
+        {
+            // Asılı kalan okuma iptal edilir; aksi hâlde çağıranın gövde akışını
+            // yok etmesi yarım kalmış bir okumayla yarışır.
+            _readCts.Cancel();
+        }
+        catch (Exception)
+        {
+            // İptal geri çağrılarından biri hata verse de asıl hata maskelenmez.
+        }
+
+        Observe(readTask);
+        throw new DownloadException(
+            $"Sunucu {DownloadHttp.ToWholeSeconds(budget)} saniye boyunca veri göndermedi; indirme takıldı.");
+    }
+
+    private static void Observe(Task task)
+    {
+        // Bırakılan okuma "unobserved task exception" olarak sayılmasın.
+        _ = task.ContinueWith(static faulted => { _ = faulted.Exception; },
+                              CancellationToken.None,
+                              TaskContinuationOptions.OnlyOnFaulted
+                              | TaskContinuationOptions.ExecuteSynchronously,
+                              TaskScheduler.Default);
+    }
+
+    public void Dispose()
+    {
+        _readCts.Dispose();
     }
 }

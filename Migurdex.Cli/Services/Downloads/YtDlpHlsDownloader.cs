@@ -91,7 +91,7 @@ public sealed class YtDlpHlsDownloader : IHlsDownloader
             throw new HlsDownloadException("HLS kaynak URL'si geçersiz.");
         }
 
-        DownloadHttp.ValidateHttpUri(sourceUri);
+        await DownloadHttp.ValidateHttpUriAsync(sourceUri, cancellationToken).ConfigureAwait(false);
         if (sourceUri.AbsoluteUri.Contains('\r') || sourceUri.AbsoluteUri.Contains('\n'))
         {
             throw new HlsDownloadException("HLS kaynak URL'si geçersiz.");
