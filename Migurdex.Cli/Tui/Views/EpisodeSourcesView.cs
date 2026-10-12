@@ -592,7 +592,9 @@ public class EpisodeSourcesView : BaseView
                                  new SpinnerColumn())
                              .StartAsync(async progressContext =>
                              {
-                                 var task = progressContext.AddTask("Hazırlanıyor", maxValue: 100);
+                                 var hedefEtiketi = TuiHelpers.FormatDownloadTarget(animeTitle, episode);
+                                 var task = progressContext.AddTask(
+                                     $"{Markup.Escape(hedefEtiketi)} • Hazırlanıyor", maxValue: 100);
                                  while (!downloadTask.IsCompleted)
                                  {
                                      if (Console.KeyAvailable
@@ -603,11 +605,11 @@ public class EpisodeSourcesView : BaseView
                                          break;
                                      }
 
-                                     UpdateDownloadTask(task, progressTracker);
+                                     UpdateDownloadTask(task, progressTracker, hedefEtiketi);
                                      await Task.Delay(100);
                                  }
 
-                                 UpdateDownloadTask(task, progressTracker);
+                                 UpdateDownloadTask(task, progressTracker, hedefEtiketi);
                              });
 
             result = await downloadTask;
@@ -709,13 +711,19 @@ public class EpisodeSourcesView : BaseView
         return Task.CompletedTask;
     }
 
-    private static void UpdateDownloadTask(ProgressTask task, DownloadProgressTracker tracker)
+    private static void UpdateDownloadTask(
+        ProgressTask task,
+        DownloadProgressTracker tracker,
+        string? targetLabel = null)
     {
+        var prefix = string.IsNullOrWhiteSpace(targetLabel)
+                         ? string.Empty
+                         : $"{Markup.Escape(targetLabel)} • ";
         var progress = tracker.Current;
         if (progress is null)
         {
             task.IsIndeterminate = true;
-            task.Description      = "Hazırlanıyor • Esc: iptal";
+            task.Description      = $"{prefix}Hazırlanıyor • Esc: iptal";
             return;
         }
 
@@ -772,12 +780,12 @@ public class EpisodeSourcesView : BaseView
                 }
             }
 
-            task.Description = detail + " • Esc: iptal";
+            task.Description = prefix + detail + " • Esc: iptal";
             return;
         }
 
         task.IsIndeterminate = true;
-        task.Description      = $"{stage} • Esc: iptal";
+        task.Description      = $"{prefix}{stage} • Esc: iptal";
     }
 
     private static string FormatBytes(long bytes)

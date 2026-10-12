@@ -80,4 +80,14 @@ public static class TuiHelpers
     {
         return Theme.Ellipsize(title.Trim(), max);
     }
+
+    public static string FormatDownloadTarget(string? animeTitle, Episode episode)
+    {
+        var episodeRef = FormatEpisodeRef(episode);
+        var title      = (animeTitle ?? string.Empty).Trim();
+
+        return title.Length == 0
+                   ? episodeRef
+                   : $"{EllipsizedTitle(title, 32)} {episodeRef}";
+    }
 }
