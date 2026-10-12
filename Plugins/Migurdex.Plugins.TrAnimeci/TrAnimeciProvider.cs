@@ -647,7 +647,7 @@ public partial class TRAnimeciProvider : IAnimeProvider
     [GeneratedRegex(@"-(\d+)-bolum$", RegexOptions.IgnoreCase)]
     private static partial Regex EpisodeNumberRegex();
 
-    [GeneratedRegex(@"<meta\s+name=""description""\s+content=""(.+?)""", RegexOptions.IgnoreCase, "en-US")]
+    [GeneratedRegex(@"<meta\s+name=""description""\s+content=""(.+?)""", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex DescriptionRegex();
 
     private sealed record SearchApiResponse(List<AnimeDto>? Data);

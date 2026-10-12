@@ -443,7 +443,7 @@ public partial class AsyaAnimeleriProvider : IAnimeProvider
         return "";
     }
 
-    [GeneratedRegex(@"iframe[^>]+src=(?:[""']([^""']+)[""']|([^\s>]+))", RegexOptions.IgnoreCase, "en-US")]
+    [GeneratedRegex(@"iframe[^>]+src=(?:[""']([^""']+)[""']|([^\s>]+))", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex IframeSrcRegex();
 
     [GeneratedRegex(@"\d+(?:\.\d+)?")]
