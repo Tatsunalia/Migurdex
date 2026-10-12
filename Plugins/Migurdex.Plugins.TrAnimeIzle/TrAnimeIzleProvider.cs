@@ -4,6 +4,7 @@ using Migurdex.Shared.Enums;
 using Migurdex.Shared.Interfaces;
 using Migurdex.Shared.Models;
 using System.Globalization;
+using System.Net;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -12,8 +13,13 @@ namespace Migurdex.Plugins.TrAnimeIzle;
 
 public partial class TrAnimeIzleProvider : IAnimeProvider
 {
+    private const int MaxConcurrentPlayerRequests = 4;
+    private const int MaxPlayerRequestAttempts = 2;
+
     private readonly HttpClient                   _httpClient;
     private readonly ILogger<TrAnimeIzleProvider> _logger;
+    private readonly SemaphoreSlim _playerRequestSlots = new(MaxConcurrentPlayerRequests,
+                                                              MaxConcurrentPlayerRequests);
 
     public TrAnimeIzleProvider(ISharedBridge bridge, ILogger<TrAnimeIzleProvider> logger)
     {
@@ -358,14 +364,15 @@ public partial class TrAnimeIzleProvider : IAnimeProvider
 
                         try
                         {
-                            using var videoResponse = await _httpClient.GetAsync(videoUrl, cancellationToken);
-                            if (!videoResponse.IsSuccessStatusCode)
+                            var videoResponse = await SendPlayerRequestAsync(
+                                () => new HttpRequestMessage(HttpMethod.Get, videoUrl),
+                                cancellationToken);
+                            if (videoResponse is null)
                             {
                                 continue;
                             }
 
-                            using var videoJson = JsonDocument.Parse(
-                                await videoResponse.Content.ReadAsStringAsync(cancellationToken));
+                            using var videoJson = JsonDocument.Parse(videoResponse.Value.Content);
                             if (!videoJson.RootElement.TryGetProperty("player", out var playerProp)
                                 || playerProp.ValueKind != JsonValueKind.String)
                             {
@@ -384,19 +391,21 @@ public partial class TrAnimeIzleProvider : IAnimeProvider
                                 && playerUri.Host.Equals(new Uri(BaseUrl).Host, StringComparison.OrdinalIgnoreCase)
                                 && playerUri.AbsolutePath.StartsWith("/player/", StringComparison.OrdinalIgnoreCase))
                             {
-                                using var playerRequest = new HttpRequestMessage(HttpMethod.Get, playerUrl);
-                                playerRequest.Headers.Referrer = new Uri(watchUrl);
-                                playerRequest.Headers.Accept.ParseAdd(
-                                    "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8");
-                                playerRequest.Options.Set(new HttpRequestOptionsKey<bool>("NoFollow"), true);
-
-                                using var playerResponse = await _httpClient.SendAsync(playerRequest, cancellationToken);
-                                if (!playerResponse.IsSuccessStatusCode)
+                                var playerResponse = await SendPlayerRequestAsync(() =>
+                                {
+                                    var request = new HttpRequestMessage(HttpMethod.Get, playerUrl);
+                                    request.Headers.Referrer = new Uri(watchUrl);
+                                    request.Headers.Accept.ParseAdd(
+                                        "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8");
+                                    request.Options.Set(new HttpRequestOptionsKey<bool>("NoFollow"), true);
+                                    return request;
+                                }, cancellationToken);
+                                if (playerResponse is null)
                                 {
                                     continue;
                                 }
 
-                                if (playerResponse.Headers.Location is { } location)
+                                if (playerResponse.Value.Location is { } location)
                                 {
                                     resolvedUrl = location.IsAbsoluteUri
                                                       ? location.ToString()
@@ -404,8 +413,7 @@ public partial class TrAnimeIzleProvider : IAnimeProvider
                                 }
                                 else
                                 {
-                                    var playerHtml = await playerResponse.Content.ReadAsStringAsync(cancellationToken);
-                                    var firePlayerHash = ExtractFirePlayerHash(playerHtml);
+                                    var firePlayerHash = ExtractFirePlayerHash(playerResponse.Value.Content);
                                     if (!string.IsNullOrEmpty(firePlayerHash))
                                     {
                                         resolvedUrl = $"https://anizmplayer.com/video/{firePlayerHash}";
@@ -448,6 +456,51 @@ public partial class TrAnimeIzleProvider : IAnimeProvider
         return sources.GroupBy(source => source.Url, StringComparer.OrdinalIgnoreCase)
                       .Select(grouping => grouping.First())
                       .ToList();
+    }
+
+    private async Task<(string Content, Uri? Location)?> SendPlayerRequestAsync(
+        Func<HttpRequestMessage> createRequest,
+        CancellationToken cancellationToken)
+    {
+        for (var attempt = 1; attempt <= MaxPlayerRequestAttempts; attempt++)
+        {
+            await _playerRequestSlots.WaitAsync(cancellationToken);
+            try
+            {
+                using var request = createRequest();
+                using var response = await _httpClient.SendAsync(request, cancellationToken);
+                if (IsTransientStatusCode(response.StatusCode) && attempt < MaxPlayerRequestAttempts)
+                {
+                    _logger.LogWarning(
+                        "player request returned transient HTTP {StatusCode}; retrying once",
+                        (int)response.StatusCode);
+                }
+                else if (!response.IsSuccessStatusCode)
+                {
+                    _logger.LogDebug("player request failed with HTTP {StatusCode}", (int)response.StatusCode);
+                    return null;
+                }
+                else
+                {
+                    return (await response.Content.ReadAsStringAsync(cancellationToken),
+                            response.Headers.Location);
+                }
+            }
+            finally
+            {
+                _playerRequestSlots.Release();
+            }
+
+            await Task.Delay(TimeSpan.FromMilliseconds(350 * attempt), cancellationToken);
+        }
+
+        return null;
+    }
+
+    private static bool IsTransientStatusCode(HttpStatusCode statusCode)
+    {
+        var code = (int)statusCode;
+        return statusCode == HttpStatusCode.TooManyRequests || code is >= 500 and <= 599;
     }
 
     private string NormalizeUrl(string url)
