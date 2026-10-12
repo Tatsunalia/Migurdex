@@ -4,6 +4,7 @@ using Migurdex.Shared.Enums;
 using Migurdex.Shared.Models;
 using System.Diagnostics;
 using System.Globalization;
+using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Runtime.CompilerServices;
@@ -11,7 +12,13 @@ using System.Text.Json;
 
 namespace Migurdex.Cli.Services;
 
-public sealed record VideoSourcesEnvelope(List<VideoSource> Sources);
+public sealed record VideoSourcesEnvelope(List<VideoSource> Sources)
+{
+    public List<VideoSource> Embeds { get; init; } = [];
+    public List<UnresolvedSourceEnvelope> Unresolved { get; init; } = [];
+}
+
+public sealed record UnresolvedSourceEnvelope(string Url, string Code, string Message);
 
 public class ApiClientService : IApiClientService
 {
@@ -471,10 +478,20 @@ public class ApiClientService : IApiClientService
                 url += $"&group={Uri.EscapeDataString(group)}";
             }
 
+            using var response = await _httpClient.GetAsync(url, cancellationToken).ConfigureAwait(false);
+            if (!response.IsSuccessStatusCode)
+            {
+                return ApiResult<IReadOnlyList<VideoSource>>.Fail(
+                    [],
+                    await ReadApiErrorAsync(response, cancellationToken).ConfigureAwait(false));
+            }
+
             VideoSourcesEnvelope? envelope = null;
             try
             {
-                envelope = await _httpClient.GetFromJsonAsync<VideoSourcesEnvelope>(url, JsonOpts, cancellationToken);
+                envelope = await response.Content
+                                         .ReadFromJsonAsync<VideoSourcesEnvelope>(JsonOpts, cancellationToken)
+                                         .ConfigureAwait(false);
             }
             catch (System.Text.Json.JsonException)
             {
@@ -483,7 +500,17 @@ public class ApiClientService : IApiClientService
                 return ApiResult<IReadOnlyList<VideoSource>>.Ok(legacy ?? []);
             }
 
-            return ApiResult<IReadOnlyList<VideoSource>>.Ok(envelope?.Sources ?? []);
+            IReadOnlyList<VideoSource> diagnosticSources = envelope is null
+                                                              ? []
+                                                              : (envelope.Sources ?? []).Concat(envelope.Embeds ?? [])
+                                                                    .Concat((envelope.Unresolved ?? [])
+                                                                        .Select(source => new VideoSource
+                                                                        {
+                                                                            Url = source.Url,
+                                                                            Type = VideoType.Embed
+                                                                        }))
+                                                                    .ToList();
+            return ApiResult<IReadOnlyList<VideoSource>>.Ok(diagnosticSources);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -830,6 +857,14 @@ public class ApiClientService : IApiClientService
         {
             var       body = await response.Content.ReadAsStringAsync(cancellationToken);
             using var doc  = JsonDocument.Parse(body);
+            if (response.StatusCode == HttpStatusCode.BadGateway
+                && doc.RootElement.TryGetProperty(ProviderSourceProblem.CodeProperty, out var codeElement)
+                && codeElement.ValueKind == JsonValueKind.String
+                && ProviderSourceProblem.TryGetSafeMessage(codeElement.GetString(), out var safeMessage))
+            {
+                return safeMessage;
+            }
+
             if (doc.RootElement.TryGetProperty("error", out var err)
                 && err.ValueKind == JsonValueKind.String
                 && !string.IsNullOrWhiteSpace(err.GetString()))

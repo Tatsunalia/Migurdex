@@ -89,8 +89,14 @@ public class SettingsView : BaseView
             new()
             {
                 Id          = "DownloadTimeout",
-                Label       = "İndirme Bekleme",
+                Label       = "Genel Kaynak Taraması",
                 ValueGetter = c => $"{c.DownloadAutoSelectTimeoutSeconds:F1} sn"
+            },
+            new()
+            {
+                Id          = "TrAnimeBatchTimeout",
+                Label       = "TrAnime Toplu Tarama",
+                ValueGetter = c => $"{c.TrAnimeIzleBatchSourceScanTimeoutSeconds:F1} sn"
             },
             new()
             {
@@ -699,7 +705,7 @@ public class SettingsView : BaseView
                 break;
             case "DownloadTimeout":
                 config.DownloadAutoSelectTimeoutSeconds =
-                    Theme.Ask("İndirme bekleme süresi (sn):", config.DownloadAutoSelectTimeoutSeconds);
+                    Theme.Ask("Genel kaynak tarama süresi (sn):", config.DownloadAutoSelectTimeoutSeconds);
 
                 if (config.DownloadAutoSelectTimeoutSeconds < 0.2)
                 {
@@ -710,6 +716,12 @@ public class SettingsView : BaseView
                 {
                     config.DownloadAutoSelectTimeoutSeconds = 120.0;
                 }
+
+                break;
+            case "TrAnimeBatchTimeout":
+                config.TrAnimeIzleBatchSourceScanTimeoutSeconds =
+                    Theme.Ask("TrAnimeIzle toplu kaynak tarama süresi (sn):",
+                        config.TrAnimeIzleBatchSourceScanTimeoutSeconds);
 
                 break;
             case "DownloadSubtitles":

@@ -1,6 +1,8 @@
 using Migurdex.Cli.Configuration;
 using Migurdex.Cli.Services.Downloads;
+using Migurdex.Shared.Enums;
 using Migurdex.Shared.Models;
+using System.Net;
 using System.Globalization;
 
 namespace Migurdex.Cli.Services;
@@ -101,6 +103,8 @@ public static class BatchDownloadPlan
         ArgumentNullException.ThrowIfNull(config);
         ArgumentNullException.ThrowIfNull(requestFactory);
 
+        var sourceScanTimeoutSeconds = GetSourceScanTimeoutSeconds(provider, config);
+
         return new DownloadQueueItem(DescribeEpisode(episode), async cancellationToken =>
         {
             Task<DownloadCandidateResult> Resolve(CancellationToken token)
@@ -111,7 +115,7 @@ public static class BatchDownloadPlan
                                                               group,
                                                               format,
                                                               config,
-                                                              config.DownloadAutoSelectTimeoutSeconds,
+                                                              sourceScanTimeoutSeconds,
                                                               token);
             }
 
@@ -123,7 +127,7 @@ public static class BatchDownloadPlan
             if (resolved.TimedOut)
             {
                 return DownloadResult.Failed(
-                    $"Kaynak taraması zaman aşımına uğradı ({config.DownloadAutoSelectTimeoutSeconds:F1} sn).");
+                    $"Kaynak taraması zaman aşımına uğradı ({sourceScanTimeoutSeconds:F1} sn).");
             }
 
             if (resolved.Error is not null)
@@ -133,7 +137,7 @@ public static class BatchDownloadPlan
 
             if (resolved.Candidates.Count == 0)
             {
-                return DownloadResult.Failed(NoCandidateMessage(format));
+                return DownloadResult.Failed(NoCandidateMessage(format, resolved.Sources));
             }
 
             var chain = DownloadQueueWork.ForCandidateChain(downloadService,
@@ -143,11 +147,72 @@ public static class BatchDownloadPlan
         });
     }
 
-    private static string NoCandidateMessage(DownloadSourceFormat format)
+    public static double GetSourceScanTimeoutSeconds(string provider, CliConfig config)
     {
+        ArgumentNullException.ThrowIfNull(config);
+
+        return string.Equals(provider, "TrAnimeIzle", StringComparison.OrdinalIgnoreCase)
+                   ? config.TrAnimeIzleBatchSourceScanTimeoutSeconds
+                   : config.DownloadAutoSelectTimeoutSeconds;
+    }
+
+    internal static string NoCandidateMessage(DownloadSourceFormat format, IReadOnlyList<VideoSource> sources)
+    {
+        if (sources.Count == 0)
+        {
+            return "API kaynak listesi boş döndü.";
+        }
+
+        var embedSources = sources.Where(source => source.Type == VideoType.Embed).ToList();
+        if (embedSources.Count > 0)
+        {
+            var allHosts = embedSources.Select(source => SanitizeHost(source.Url))
+                                       .Where(host => host is not null)
+                                       .Select(host => host!)
+                                       .Distinct(StringComparer.OrdinalIgnoreCase)
+                                       .OrderBy(host => host, StringComparer.OrdinalIgnoreCase)
+                                       .ToList();
+            var embedHosts = allHosts.Take(5).ToList();
+            var remaining = allHosts.Count - embedHosts.Count;
+            var hostList = embedHosts.Count > 0 ? string.Join(", ", embedHosts) : "sunucu adı belirlenemedi";
+            if (remaining > 0)
+            {
+                hostList += $", +{remaining}";
+            }
+
+            return $"API doğrudan MP4/HLS kaynağı döndürmedi; çözümlenemeyen oynatıcı sunucuları: {hostList}.";
+        }
+
         return format == DownloadSourceFormat.Auto
                    ? "API'den indirilebilir doğrudan MP4/HLS kaynağı bulunamadı."
                    : $"'{format.ToString().ToLowerInvariant()}' biçiminde uygun kaynak bulunamadı.";
+    }
+
+    private static string? SanitizeHost(string url)
+    {
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri))
+        {
+            return null;
+        }
+
+        var host = uri.IdnHost.TrimEnd('.').ToLowerInvariant();
+        if (host.Length is 0 or > 253 || IPAddress.TryParse(host, out _))
+        {
+            return null;
+        }
+
+        var labels = host.Split('.');
+        if (labels.Length < 2
+            || labels.Any(label => label.Length is 0 or > 63
+                                   || label[0] == '-'
+                                   || label[^1] == '-'
+                                   || label.Any(character => !char.IsAsciiLetterOrDigit(character)
+                                                             && character != '-')))
+        {
+            return null;
+        }
+
+        return host;
     }
 
     public static string SummaryTitle(DownloadQueueSummary summary)

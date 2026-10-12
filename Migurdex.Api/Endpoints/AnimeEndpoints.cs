@@ -703,12 +703,24 @@ public static class AnimeEndpoints
         catch (Exception ex)
         {
             logger.LogWarning(ex, "getSources failed for provider {Provider}", provider);
-            var (sourcesOutcome, sourcesError) =
+            var (sourcesOutcome, _) =
                 ProviderErrorMapper.Map(ex, $"Upstream kaynak hatası ({provider}).");
             blame.RecordProvider(provider, "sources", sourcesSw.ElapsedMilliseconds, sourcesOutcome);
-            return Results.Problem(sourcesError,
+
+            var problemCode = string.Equals(p.Name, "TrAnimeIzle", StringComparison.OrdinalIgnoreCase)
+                              && ex is InvalidOperationException
+                              && ex.Message.StartsWith("TrAnimeIzle ", StringComparison.Ordinal)
+                                  ? ProviderSourceProblem.TrAnimeIzleUpstreamInvalidResponse
+                                  : ProviderSourceProblem.SourcesUnavailable;
+            ProviderSourceProblem.TryGetSafeMessage(problemCode, out var safeDetail);
+
+            return Results.Problem(detail: safeDetail,
                                    statusCode: StatusCodes.Status502BadGateway,
-                                   title: "Upstream hata");
+                                   title: "Upstream kaynak hatası",
+                                   extensions: new Dictionary<string, object?>
+                                   {
+                                       [ProviderSourceProblem.CodeProperty] = problemCode
+                                   });
         }
     }
 }

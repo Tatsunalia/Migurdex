@@ -12,10 +12,15 @@ public class CliConfig
 
     /// <summary>Ayarlarda hiçbir şey seçilmediyse kullanılan eşzamanlılık.</summary>
     public const int DefaultDownloadConcurrency = 2;
+    public const double MinSourceScanTimeoutSeconds = 0.2;
+    public const double MaxSourceScanTimeoutSeconds = 120.0;
+    public const double DefaultTrAnimeIzleBatchSourceScanTimeoutSeconds = 30.0;
 
     private string _downloadDirectory   = DefaultDownloadDirectory;
     private int    _downloadConcurrency = DefaultDownloadConcurrency;
     private string _ytDlpPath           = "yt-dlp";
+    private double _trAnimeIzleBatchSourceScanTimeoutSeconds =
+        DefaultTrAnimeIzleBatchSourceScanTimeoutSeconds;
 
     private static readonly Regex EnvironmentVariablePattern = new(
         @"%(?<percent>[^%]+)%|\$(?:\{(?<braced>[A-Za-z_][A-Za-z0-9_]*)\}|(?<plain>[A-Za-z_][A-Za-z0-9_]*))",
@@ -66,6 +71,13 @@ public class CliConfig
 
     public bool   AutoDownloadBestSource           { get; set; } = false;
     public double DownloadAutoSelectTimeoutSeconds { get; set; } = 5;
+
+    /// <summary>TrAnimeIzle toplu indirmesinde her bölümün kaynak tarama bütçesi.</summary>
+    public double TrAnimeIzleBatchSourceScanTimeoutSeconds
+    {
+        get => _trAnimeIzleBatchSourceScanTimeoutSeconds;
+        set => _trAnimeIzleBatchSourceScanTimeoutSeconds = ClampSourceScanTimeout(value);
+    }
 
     public bool    UpdateCheckEnabled { get; set; } = true;
     public string  UpdateChannel      { get; set; } = "stable";
@@ -154,6 +166,16 @@ public class CliConfig
         }
 
         return value > MaxDownloadConcurrency ? MaxDownloadConcurrency : value;
+    }
+
+    public static double ClampSourceScanTimeout(double value)
+    {
+        if (!double.IsFinite(value))
+        {
+            return DefaultTrAnimeIzleBatchSourceScanTimeoutSeconds;
+        }
+
+        return Math.Clamp(value, MinSourceScanTimeoutSeconds, MaxSourceScanTimeoutSeconds);
     }
 
     /// <summary>
