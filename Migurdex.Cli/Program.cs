@@ -43,6 +43,12 @@ public static class Program
             AnsiConsole.Profile.Capabilities.ColorSystem = ColorSystem.NoColors;
         }
 
+        if (args.Length > 0
+            && string.Equals(args[0], LinuxOrphanGuard.WatcherArgument, StringComparison.Ordinal))
+        {
+            return LinuxOrphanGuard.RunWatcher(args);
+        }
+
         CleanStaleBackup();
 
         if (args.Any(a => a.Equals("--version", StringComparison.OrdinalIgnoreCase)

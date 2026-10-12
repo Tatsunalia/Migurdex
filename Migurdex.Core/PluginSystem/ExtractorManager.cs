@@ -159,6 +159,10 @@ public class ExtractorManager : IExtractorManager
 
                 failures.Add(new ExtractionFailure(extractor.Name, ex.Kind, ex.Message));
             }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
             catch (Exception ex)
             {
                 _logger.LogError(ex,

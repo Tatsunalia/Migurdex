@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using Migurdex.Cli.Services.Downloads;
 
 namespace Migurdex.Cli.Utils;
 
@@ -49,7 +50,13 @@ public static class ChildProcessTracker
 
     public static void Track(Process process)
     {
-        if (!OperatingSystem.IsWindows() || _jobHandle == IntPtr.Zero)
+        if (!OperatingSystem.IsWindows())
+        {
+            LinuxOrphanGuard.Attach(process);
+            return;
+        }
+
+        if (_jobHandle == IntPtr.Zero)
         {
             return;
         }

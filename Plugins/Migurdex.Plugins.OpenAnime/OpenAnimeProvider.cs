@@ -426,11 +426,14 @@ public class OpenAnimeProvider : IAnimeProvider
         bool                                          isRetry           = false,
         CancellationToken                             cancellationToken = default)
     {
+        T? result = default;
+        var retry = false;
+
         await _requestSemaphore.WaitAsync(cancellationToken);
         try
         {
             await EnsureTokenAsync(cancellationToken);
-            var request = new HttpRequestMessage(method ?? HttpMethod.Get, url);
+            using var request = new HttpRequestMessage(method ?? HttpMethod.Get, url);
             foreach (var header in _defaultHeaders)
             {
                 request.Headers.Add(header.Key, header.Value);
@@ -447,30 +450,37 @@ public class OpenAnimeProvider : IAnimeProvider
                 request.Content = JsonContent.Create(body);
             }
 
-            var response = await _httpClient.SendAsync(request, cancellationToken);
+            using var response = await _httpClient.SendAsync(request, cancellationToken);
             if ((response.StatusCode == HttpStatusCode.Unauthorized
                  || response.StatusCode == HttpStatusCode.Forbidden)
                 && !isRetry)
             {
                 _sessionId    = null;
                 _gatewayToken = null;
-
-                return await SendRequestAsync<T>(url, method, body, true, cancellationToken);
+                retry = true;
             }
-
-            if (!response.IsSuccessStatusCode)
+            else if (!response.IsSuccessStatusCode)
             {
                 return default;
             }
-
-            if (typeof(T) == typeof(string))
+            else if (typeof(T) == typeof(string))
             {
-                return (T) (object) await response.Content.ReadAsStringAsync(cancellationToken);
+                result = (T) (object) await response.Content.ReadAsStringAsync(cancellationToken);
             }
-
-            return await response.Content.ReadFromJsonAsync<T>(cancellationToken);
+            else
+            {
+                result = await response.Content.ReadFromJsonAsync<T>(cancellationToken);
+            }
         }
         finally { _requestSemaphore.Release(); }
+
+        // Retry only after releasing the permit, because SemaphoreSlim is not reentrant.
+        if (retry)
+        {
+            return await SendRequestAsync<T>(url, method, body, true, cancellationToken);
+        }
+
+        return result;
     }
 
     private async Task<List<SimpleEpisode>> GetSeasonEpisodesAsync(string slug,
