@@ -757,10 +757,7 @@ public class SettingsView : BaseView
 
                 break;
             case "DownloadDirectory":
-                // Windows'ta sistem penceresi denenir; kullanılamazsa mevcut TUI gezgini açılır.
-                // İki seçim de sonuç vermezse aşağıdaki elle yol girişi korunur.
-                var secilenDizin = NativeFolderPicker.PencereIleSec(config.DownloadDirectory)
-                                   ?? FolderPicker.Select(config.DownloadDirectory, "İndirme dizini seç");
+                var secilenDizin = FolderPicker.Select(config.DownloadDirectory, "İndirme dizini seç");
 
                 if (!string.IsNullOrWhiteSpace(secilenDizin))
                 {
